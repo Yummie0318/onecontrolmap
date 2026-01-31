@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, useEffect } from "react";
 import ResultMap from "../components/ResultMapClient";
 
 type AiResponse = {
@@ -14,203 +14,195 @@ type AiResponse = {
   error?: string;
 };
 
-function ThinkingModal({ open, text }: { open: boolean; text: string }) {
-  if (!open) return null;
-  return (
-    <div className="overlay" role="status" aria-live="polite">
-      <div className="modal">
-        <div className="spinner" />
-        <div className="modalText">
-          <div className="modalTitle">Generating your request…</div>
-          <div className="modalSub">{text}</div>
-        </div>
-      </div>
+const LOADING_STEPS = [
+  "Parsing query…",
+  "Matching layer…",
+  "Running SQL…",
+  "Rendering map…",
+] as const;
 
-      <style>{`
-        .overlay{
-          position: fixed;
-          inset: 0;
-          background: rgba(0,0,0,.30);
-          backdrop-filter: blur(6px);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 1000;
-          padding: 18px;
-        }
-        .modal{
-          width: min(520px, 94vw);
-          background: #fff;
-          border: 1px solid #e7e7e7;
-          border-radius: 16px;
-          padding: 16px;
-          display: flex;
-          align-items: center;
-          gap: 14px;
-          box-shadow: 0 30px 120px rgba(0,0,0,.18);
-        }
-        .spinner{
-          width: 44px;
-          height: 44px;
-          border-radius: 999px;
-          border: 2px solid rgba(0,0,0,.12);
-          border-top-color: rgba(0,0,0,.75);
-          animation: spin .9s linear infinite;
-          flex: 0 0 auto;
-        }
-        @keyframes spin{ to { transform: rotate(360deg); } }
-        .modalText{
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-          min-width: 0;
-        }
-        .modalTitle{
-          font-weight: 900;
-          letter-spacing: -.02em;
-          color: #111;
-        }
-        .modalSub{
-          font-size: 13px;
-          color: #444;
-          line-height: 1.35;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          max-width: 420px;
-        }
-      `}</style>
+function ThinkingModal({ open }: { open: boolean }) {
+  const [stepIndex, setStepIndex] = useState(0);
+
+  useEffect(() => {
+    if (!open) return;
+    setStepIndex(0);
+    const t = setInterval(() => {
+      setStepIndex((i) => (i + 1) % LOADING_STEPS.length);
+    }, 900);
+    return () => clearInterval(t);
+  }, [open]);
+
+  if (!open) return null;
+
+  return (
+    <div className="overlay" role="status" aria-live="polite" aria-busy="true">
+      <div className="modal">
+        <div className="brandRow">
+          <div className="pulseDot" aria-hidden="true" />
+          <div className="brandText">
+            <div className="modalTitle">Processing your request</div>
+            <div className="modalSub">{LOADING_STEPS[stepIndex]}</div>
+          </div>
+        </div>
+
+        <div className="progress" aria-hidden="true">
+          <div className="bar" />
+        </div>
+
+        <style>{`
+          .overlay{
+            position: fixed;
+            inset: 0;
+            background: rgba(10,10,10,.40);
+            backdrop-filter: blur(10px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+          }
+          .modal{
+            width: min(560px, 96vw);
+            background: #fff;
+            border: 1px solid rgba(0,0,0,.08);
+            border-radius: 18px;
+            padding: 16px;
+            box-shadow: 0 30px 120px rgba(0,0,0,.22);
+          }
+          .brandRow{
+            display:flex;
+            gap: 12px;
+            align-items:flex-start;
+          }
+          .pulseDot{
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            background: #111;
+            margin-top: 6px;
+            animation: pulse 1.1s ease-in-out infinite;
+          }
+          @keyframes pulse{
+            0%,100%{ transform: scale(1); opacity: .7; }
+            50%{ transform: scale(1.55); opacity: 1; }
+          }
+          .brandText{ min-width: 0; }
+          .modalTitle{
+            font-weight: 900;
+            letter-spacing: -.02em;
+            color: #111;
+            font-size: 14px;
+            line-height: 1.2;
+          }
+          .modalSub{
+            margin-top: 4px;
+            font-size: 13px;
+            color: #444;
+            line-height: 1.35;
+            word-break: break-word;
+          }
+          .progress{
+            margin-top: 14px;
+            height: 10px;
+            border-radius: 999px;
+            background: rgba(0,0,0,.06);
+            overflow: hidden;
+          }
+          .bar{
+            height: 100%;
+            width: 42%;
+            background: rgba(0,0,0,.85);
+            border-radius: 999px;
+            animation: slide 1.1s ease-in-out infinite;
+          }
+          @keyframes slide{
+            0%{ transform: translateX(-120%); }
+            100%{ transform: translateX(260%); }
+          }
+
+          @media (prefers-reduced-motion: reduce){
+            .pulseDot, .bar{ animation: none; }
+            .bar{ width: 60%; transform: translateX(0); }
+          }
+        `}</style>
+      </div>
     </div>
   );
 }
 
-/** ✅ ChatGPT-like assistant bubble */
-function AssistantBubble({
+/**
+ * ✅ Assistant summary card (NO LONG SENTENCE)
+ * Shows ONLY:
+ * Assistant
+ * AI Search
+ * Chips (dataset + count)
+ */
+function ResultChipsInline({
   dataset,
-  normalized,
-  explanation,
   count,
 }: {
   dataset: string | null;
-  normalized: string | null;
-  explanation: string | null;
   count: number;
 }) {
-  // show even if explanation missing, but keep it clean
-  const line1 = explanation?.trim()
-    ? explanation.trim()
-    : "Here are the results I found on the map.";
-
   const chips: string[] = [];
   if (dataset) chips.push(dataset);
-  if (normalized) chips.push(normalized);
   chips.push(`${count} feature(s)`);
 
   return (
-    <div className="assistantWrap">
-      <div className="assistantBubble">
-        <div className="assistantTop">
-          <div className="assistantAvatar" aria-hidden="true">
-            AI
-          </div>
-          <div className="assistantText">
-            <div className="assistantTitle">Assistant</div>
-            <div className="assistantLine">{line1}</div>
-
-            <div className="assistantChips">
-              {chips.map((c, i) => (
-                <span className="chip" key={`${c}-${i}`}>
-                  {c}
-                </span>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
+    <div className="chipsInline" aria-label="Result tags">
+      {chips.map((c, i) => (
+        <span className="chip" key={`${c}-${i}`} title={c}>
+          {c}
+        </span>
+      ))}
 
       <style>{`
-        .assistantWrap{
-          width: min(1100px, 100%);
-          display:flex;
-          justify-content:flex-start;
-        }
-        .assistantBubble{
+        .chipsInline{
           width: 100%;
-          border: 1px solid #ededed;
-          background: #fff;
-          border-radius: 16px;
-          padding: 12px 12px;
-          box-shadow: 0 12px 40px rgba(0,0,0,.08);
-        }
-        .assistantTop{
-          display:flex;
-          gap: 10px;
-          align-items:flex-start;
-        }
-        .assistantAvatar{
-          width: 34px;
-          height: 34px;
-          border-radius: 999px;
-          background: #111;
-          color: #fff;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          font-weight: 900;
-          font-size: 12px;
-          flex: 0 0 auto;
-        }
-        .assistantText{
-          min-width: 0;
-          display:flex;
-          flex-direction:column;
-          gap: 4px;
-        }
-        .assistantTitle{
-          font-weight: 900;
-          letter-spacing: -.02em;
-          font-size: 13px;
-          color: #111;
-        }
-        .assistantLine{
-          font-size: 13px;
-          color: #333;
-          line-height: 1.35;
-          word-break: break-word;
-        }
-        .assistantChips{
           display:flex;
           gap: 8px;
+          align-items:center;
           flex-wrap: wrap;
-          margin-top: 6px;
+          padding: 2px 0; /* very small height */
         }
         .chip{
           font-size: 12px;
           padding: 6px 10px;
           border-radius: 999px;
-          border: 1px solid #e7e7e7;
-          background: #fafafa;
+          border: 1px solid rgba(0,0,0,.10);
+          background: rgba(0,0,0,.03);
           color: #111;
           max-width: 100%;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
+
+        /* Mobile: horizontal scroll instead of wrapping */
+        @media (max-width: 520px){
+          .chipsInline{
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            padding-bottom: 2px;
+          }
+          .chip{ flex: 0 0 auto; }
+        }
       `}</style>
     </div>
   );
 }
 
+
 export default function AiMapPage() {
   const [message, setMessage] = useState("show me cbfma of cenro alcala");
   const [loading, setLoading] = useState(false);
-  const [thinkingText, setThinkingText] = useState("Reading your query…");
 
   const [geojson, setGeojson] = useState<any | null>(null);
 
   const [dataset, setDataset] = useState<string | null>(null);
-  const [normalized, setNormalized] = useState<string | null>(null);
-  const [explanation, setExplanation] = useState<string | null>(null);
+
 
   const [error, setError] = useState<string>("");
   const [debug, setDebug] = useState<any | null>(null);
@@ -218,14 +210,25 @@ export default function AiMapPage() {
   const inFlightRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  const featureCount = useMemo(() => {
-    return geojson?.features?.length ?? 0;
-  }, [geojson]);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
+  const featureCount = useMemo(() => geojson?.features?.length ?? 0, [geojson]);
   const showMap = geojson !== null;
 
-  async function runQuery() {
-    const q = message.trim();
+  const tips = useMemo(
+    () => ["cbfma alcala", "protected area", "cbfma po alias mufmpc", "smallest cbfma"],
+    []
+  );
+
+  function applyTip(t: string) {
+    setMessage(t);
+    requestAnimationFrame(() => inputRef.current?.focus());
+    // Optional: auto-run immediately after clicking a tip
+    // runQuery(t);
+  }
+
+  async function runQuery(forcedMessage?: string) {
+    const q = (forcedMessage ?? message).trim();
     if (!q) return;
 
     if (inFlightRef.current) return;
@@ -236,17 +239,13 @@ export default function AiMapPage() {
     abortRef.current = controller;
 
     setLoading(true);
-    setThinkingText("Understanding your request…");
     setError("");
     setDebug(null);
 
     setDataset(null);
-    setNormalized(null);
-    setExplanation(null);
+
 
     try {
-      setThinkingText("Searching layers and building GeoJSON…");
-
       const r = await fetch("/api/ai/map-query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -269,8 +268,7 @@ export default function AiMapPage() {
 
       setGeojson(safeGeojson);
       setDataset(j.dataset ?? null);
-      setNormalized(j.normalized ?? null);
-      setExplanation(j.explanation ?? null);
+  
 
       setDebug({ parsed: j.parsed, meta: j.meta });
     } catch (e: any) {
@@ -285,26 +283,30 @@ export default function AiMapPage() {
 
   return (
     <div className="page">
-      <ThinkingModal open={loading} text={thinkingText} />
+      <ThinkingModal open={loading} />
 
       {!showMap ? (
         <div className="center">
-          <h1 className="title">One Control Map Search</h1>
+          <div className="hero">
+            <h1 className="title">One Control Map Search</h1>
+            <p className="subtitle">
+              Search GIS layers using natural language (CBFMA, PA, NGP, SIFMA, Fire).
+            </p>
+          </div>
 
           <div className="searchRow">
             <input
+              ref={inputRef}
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               placeholder='Try: "cbfma cenro alcala" or "cbfma po alias mufmpc"'
               className="input"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") runQuery();
-              }}
+              onKeyDown={(e) => e.key === "Enter" && runQuery()}
             />
 
             <button
               type="button"
-              onClick={runQuery}
+              onClick={() => runQuery()}
               disabled={loading || !message.trim()}
               className="btn"
             >
@@ -315,50 +317,68 @@ export default function AiMapPage() {
           {error ? <div className="error">❌ {error}</div> : null}
 
           <div className="miniInfo">
-            <div>
-              <b>Tip:</b> Try “cbfma alcala”, “cbfma cenro alcala”, “cbfma po alias mufmpc”, “pa aparri”.
+            <div className="tipsTitle">Tips</div>
+            <div className="tipsGrid">
+              {tips.map((t) => (
+                <button
+                  type="button"
+                  key={t}
+                  className="tip"
+                  onClick={() => applyTip(t)}
+                >
+                  {t}
+                </button>
+              ))}
             </div>
           </div>
         </div>
       ) : (
         <div className="mapShell">
           <div className="topBar">
-            <div className="topLeft">
-              <div className="topTitle">One Control Map</div>
-              <div className="topSub">
-                {featureCount} feature(s)
-                {dataset ? ` • ${dataset}` : ""}
-                {normalized ? ` • ${normalized}` : ""}
+            <div className="topRow">
+              <div className="topLeft">
+                <div className="topTitle">One Control Map</div>
+                <div className="topSub">
+                  {featureCount} feature(s)
+                  {dataset ? ` • ${dataset}` : ""}
+                </div>
+              </div>
+
+              <div className="searchRow topSearch">
+                <input
+                  ref={inputRef}
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  placeholder="Search again…"
+                  className="input"
+                  onKeyDown={(e) => e.key === "Enter" && runQuery()}
+                />
+                <button
+                  type="button"
+                  onClick={() => runQuery()}
+                  disabled={loading || !message.trim()}
+                  className="btn"
+                >
+                  Search
+                </button>
+              </div>
+
+              <div className="tipsInline" aria-label="Quick tips">
+                {tips.slice(0, 3).map((t) => (
+                  <button
+                    type="button"
+                    key={t}
+                    className="tipInline"
+                    onClick={() => applyTip(t)}
+                  >
+                    {t}
+                  </button>
+                ))}
               </div>
             </div>
 
-            <div className="searchRow topSearch">
-              <input
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                placeholder="Search again…"
-                className="input"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") runQuery();
-                }}
-              />
-              <button
-                type="button"
-                onClick={runQuery}
-                disabled={loading || !message.trim()}
-                className="btn"
-              >
-                Search
-              </button>
-            </div>
-
-            {/* ✅ ChatGPT-like assistant bubble */}
-            <AssistantBubble
-              dataset={dataset}
-              normalized={normalized}
-              explanation={explanation}
-              count={featureCount}
-            />
+            {/* ✅ NO explanation line anymore */}
+  
           </div>
 
           {error ? <div className="error errorTop">❌ {error}</div> : null}
@@ -389,70 +409,116 @@ export default function AiMapPage() {
           flex-direction:column;
           align-items:center;
           justify-content:center;
-          padding: 20px;
+          padding: calc(18px + env(safe-area-inset-top)) 16px calc(18px + env(safe-area-inset-bottom));
           gap: 14px;
           text-align:center;
         }
-
+        .hero{
+          width: min(920px, 100%);
+          display:flex;
+          flex-direction:column;
+          gap: 6px;
+        }
         .title{
-          margin: 0 0 6px;
-          font-size: 22px;
-          font-weight: 900;
-          letter-spacing: -.02em;
+          margin: 0;
+          font-size: clamp(20px, 3.6vw, 28px);
+          font-weight: 950;
+          letter-spacing: -.03em;
+        }
+        .subtitle{
+          margin: 0;
+          font-size: 13px;
+          color: #555;
+          line-height: 1.45;
         }
 
         .searchRow{
-          width: min(820px, 92vw);
+          width: min(920px, 100%);
           display:flex;
           gap: 10px;
           align-items:center;
         }
-
         .input{
           flex: 1;
           padding: 12px 14px;
-          border: 1px solid #dcdcdc;
-          border-radius: 12px;
+          border: 1px solid rgba(0,0,0,.16);
+          border-radius: 14px;
           font-size: 15px;
           outline: none;
           background: #fff;
+          min-width: 0;
         }
         .input:focus{
-          border-color: #bdbdbd;
+          border-color: rgba(0,0,0,.35);
           box-shadow: 0 0 0 4px rgba(0,0,0,.06);
         }
-
         .btn{
           padding: 12px 14px;
-          border-radius: 12px;
-          border: 1px solid #d0d0d0;
+          border-radius: 14px;
+          border: 1px solid rgba(0,0,0,.12);
           background: #111;
           color: #fff;
-          font-weight: 800;
+          font-weight: 900;
           cursor: pointer;
-          min-width: 92px;
+          min-width: 110px;
         }
         .btn:disabled{
           opacity: .55;
           cursor: not-allowed;
         }
 
+        @media (max-width: 640px){
+          .searchRow{
+            flex-direction: column;
+            align-items: stretch;
+          }
+          .btn{
+            width: 100%;
+            min-width: unset;
+          }
+        }
+
         .error{
-          width: min(820px, 92vw);
+          width: min(920px, 100%);
           border: 1px solid rgba(220,38,38,.25);
           background: rgba(220,38,38,.08);
           color: #7f1d1d;
           padding: 10px 12px;
-          border-radius: 12px;
+          border-radius: 14px;
           text-align: left;
           white-space: pre-wrap;
         }
 
         .miniInfo{
-          width: min(820px, 92vw);
-          font-size: 12px;
-          color: #555;
+          width: min(920px, 100%);
+          text-align: left;
+          border: 1px solid rgba(0,0,0,.08);
+          border-radius: 16px;
+          padding: 12px;
+          background: rgba(0,0,0,.02);
         }
+        .tipsTitle{
+          font-weight: 900;
+          font-size: 12px;
+          color: #111;
+          margin-bottom: 10px;
+        }
+        .tipsGrid{
+          display:flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .tip{
+          font-size: 12px;
+          padding: 7px 10px;
+          border-radius: 999px;
+          border: 1px solid rgba(0,0,0,.10);
+          background: #fff;
+          color: #111;
+          cursor: pointer;
+          text-align: left;
+        }
+        .tip:active{ transform: translateY(1px); }
 
         .mapShell{
           height: 100vh;
@@ -460,15 +526,24 @@ export default function AiMapPage() {
           flex-direction:column;
           overflow: hidden;
         }
-
         .topBar{
-          padding: 14px 16px;
-          border-bottom: 1px solid #ededed;
-          background: #fff;
+          position: sticky;
+          top: 0;
+          z-index: 5;
+          padding: calc(12px + env(safe-area-inset-top)) 14px 12px;
+          border-bottom: 1px solid rgba(0,0,0,.08);
+          background: rgba(255,255,255,.92);
+          backdrop-filter: blur(10px);
           display:flex;
           flex-direction:column;
-          gap: 12px; /* more space for assistant bubble */
+            gap: 8px;
           flex: 0 0 auto;
+        }
+        .topRow{
+          width: 100%;
+          display:flex;
+          flex-direction:column;
+          gap: 10px;
         }
 
         .topLeft{
@@ -476,23 +551,44 @@ export default function AiMapPage() {
           flex-direction:column;
           gap: 2px;
         }
-
         .topTitle{
-          font-weight: 900;
+          font-weight: 950;
           letter-spacing: -.02em;
         }
-
         .topSub{
           font-size: 12px;
           color: #555;
         }
-
         .topSearch{
-          width: min(1100px, 100%);
+          width: 100%;
+        }
+
+        .tipsInline{
+          display:flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .tipInline{
+          font-size: 12px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid rgba(0,0,0,.10);
+          background: rgba(0,0,0,.03);
+          color: #111;
+          cursor:pointer;
+        }
+        @media (max-width: 520px){
+          .tipsInline{
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            padding-bottom: 2px;
+            -webkit-overflow-scrolling: touch;
+          }
+          .tipInline{ flex: 0 0 auto; }
         }
 
         .errorTop{
-          margin: 10px 16px 0;
+          margin: 10px 14px 0;
           width: auto;
           max-width: 1100px;
         }
@@ -510,19 +606,20 @@ export default function AiMapPage() {
           width: min(520px, 92vw);
           max-height: 45vh;
           overflow: auto;
-          border: 1px solid #eee;
+          border: 1px solid rgba(0,0,0,.10);
           background: #fff;
-          border-radius: 12px;
+          border-radius: 14px;
           box-shadow: 0 20px 80px rgba(0,0,0,.18);
           padding: 10px;
+          z-index: 20;
         }
-        .debugTitle{ font-weight: 900; margin-bottom: 6px; }
+        .debugTitle{ font-weight: 950; margin-bottom: 6px; }
         .debugPre{
           margin: 0;
           font-size: 12px;
-          background: #fafafa;
-          border: 1px solid #eee;
-          border-radius: 10px;
+          background: rgba(0,0,0,.03);
+          border: 1px solid rgba(0,0,0,.08);
+          border-radius: 12px;
           padding: 10px;
           overflow-x: auto;
         }
