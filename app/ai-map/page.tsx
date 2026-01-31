@@ -1,21 +1,18 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import ResultMap from "../components/ResultMapClient";
 
-type Plan = {
-  layerName: string;
-  filters: Array<{ field: string; op: string; value: any }>;
-  limit: number;
-  orderBy?: { field: string; direction: "asc" | "desc" } | null;
-  aggregate?: { type: "count" | "sum" | "avg" | "min" | "max"; field?: string } | null;
-  explanation?: string | null;
+type AiResponse = {
+  ok: boolean;
+  dataset?: string;
+  normalized?: string;
+  explanation?: string;
+  geojson?: any;
+  parsed?: any;
+  meta?: any;
+  error?: string;
 };
-
-type Stats =
-  | { featureCount?: number }
-  | { aggregate?: { type: string; field?: string }; value?: number | null }
-  | null;
 
 function ThinkingModal({ open, text }: { open: boolean; text: string }) {
   if (!open) return null;
@@ -87,95 +84,202 @@ function ThinkingModal({ open, text }: { open: boolean; text: string }) {
   );
 }
 
+/** ✅ ChatGPT-like assistant bubble */
+function AssistantBubble({
+  dataset,
+  normalized,
+  explanation,
+  count,
+}: {
+  dataset: string | null;
+  normalized: string | null;
+  explanation: string | null;
+  count: number;
+}) {
+  // show even if explanation missing, but keep it clean
+  const line1 = explanation?.trim()
+    ? explanation.trim()
+    : "Here are the results I found on the map.";
+
+  const chips: string[] = [];
+  if (dataset) chips.push(dataset);
+  if (normalized) chips.push(normalized);
+  chips.push(`${count} feature(s)`);
+
+  return (
+    <div className="assistantWrap">
+      <div className="assistantBubble">
+        <div className="assistantTop">
+          <div className="assistantAvatar" aria-hidden="true">
+            AI
+          </div>
+          <div className="assistantText">
+            <div className="assistantTitle">Assistant</div>
+            <div className="assistantLine">{line1}</div>
+
+            <div className="assistantChips">
+              {chips.map((c, i) => (
+                <span className="chip" key={`${c}-${i}`}>
+                  {c}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        .assistantWrap{
+          width: min(1100px, 100%);
+          display:flex;
+          justify-content:flex-start;
+        }
+        .assistantBubble{
+          width: 100%;
+          border: 1px solid #ededed;
+          background: #fff;
+          border-radius: 16px;
+          padding: 12px 12px;
+          box-shadow: 0 12px 40px rgba(0,0,0,.08);
+        }
+        .assistantTop{
+          display:flex;
+          gap: 10px;
+          align-items:flex-start;
+        }
+        .assistantAvatar{
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          background: #111;
+          color: #fff;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          font-weight: 900;
+          font-size: 12px;
+          flex: 0 0 auto;
+        }
+        .assistantText{
+          min-width: 0;
+          display:flex;
+          flex-direction:column;
+          gap: 4px;
+        }
+        .assistantTitle{
+          font-weight: 900;
+          letter-spacing: -.02em;
+          font-size: 13px;
+          color: #111;
+        }
+        .assistantLine{
+          font-size: 13px;
+          color: #333;
+          line-height: 1.35;
+          word-break: break-word;
+        }
+        .assistantChips{
+          display:flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          margin-top: 6px;
+        }
+        .chip{
+          font-size: 12px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid #e7e7e7;
+          background: #fafafa;
+          color: #111;
+          max-width: 100%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+      `}</style>
+    </div>
+  );
+}
+
 export default function AiMapPage() {
-  const [message, setMessage] = useState("show cbfma");
+  const [message, setMessage] = useState("show me cbfma of cenro alcala");
   const [loading, setLoading] = useState(false);
   const [thinkingText, setThinkingText] = useState("Reading your query…");
 
-  const [plan, setPlan] = useState<Plan | null>(null);
   const [geojson, setGeojson] = useState<any | null>(null);
-  const [stats, setStats] = useState<Stats>(null);
-  const [layerPicked, setLayerPicked] = useState<string[] | null>(null);
+
+  const [dataset, setDataset] = useState<string | null>(null);
+  const [normalized, setNormalized] = useState<string | null>(null);
+  const [explanation, setExplanation] = useState<string | null>(null);
 
   const [error, setError] = useState<string>("");
   const [debug, setDebug] = useState<any | null>(null);
 
-  const featureCount = useMemo(() => {
-    if (stats && "featureCount" in stats) return stats.featureCount ?? 0;
-    return geojson?.features?.length ?? 0;
-  }, [geojson, stats]);
+  const inFlightRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
-  // ✅ show map ONLY when geojson exists (even if 0 features, still show basemap)
+  const featureCount = useMemo(() => {
+    return geojson?.features?.length ?? 0;
+  }, [geojson]);
+
   const showMap = geojson !== null;
 
   async function runQuery() {
     const q = message.trim();
-    if (!q || loading) return;
+    if (!q) return;
+
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     setLoading(true);
     setThinkingText("Understanding your request…");
     setError("");
     setDebug(null);
 
-    // ✅ hide map while searching again
-    setPlan(null);
-    setGeojson(null);
-    setStats(null);
-    setLayerPicked(null);
+    setDataset(null);
+    setNormalized(null);
+    setExplanation(null);
 
     try {
-      // 1) AI plan
-      setThinkingText("Planning the query (AI)…");
-      const r1 = await fetch("/api/ai/map-query", {
+      setThinkingText("Searching layers and building GeoJSON…");
+
+      const r = await fetch("/api/ai/map-query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: q }),
+        body: JSON.stringify({ message: q, limit: 800 }),
+        signal: controller.signal,
+        cache: "no-store",
       });
-      const j1 = await r1.json();
 
-      if (!j1.ok) {
-        setDebug(j1);
-        throw new Error(j1.error || "AI planning failed");
+      const j = (await r.json().catch(() => ({}))) as AiResponse;
+
+      if (!j?.ok) {
+        setDebug(j);
+        throw new Error(j?.error || "Search failed");
       }
 
-      setPlan(j1.plan);
-
-      if (typeof j1.thinking_text === "string" && j1.thinking_text.trim()) {
-        setThinkingText(j1.thinking_text.trim());
-      } else {
-        setThinkingText("Preparing GeoJSON…");
-      }
-
-      // 2) Run plan
-      setThinkingText("Fetching GeoJSON and preparing the map…");
-      const r2 = await fetch("/api/map/run-plan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan: j1.plan }),
-      });
-      const j2 = await r2.json();
-
-      if (!j2.ok) {
-        setDebug(j2);
-        throw new Error(j2.error || "DB query failed");
-      }
-
-      // ✅ IMPORTANT: even empty results should still show basemap,
-      // so keep geojson as {} with features:[] instead of null
       const safeGeojson =
-        j2.geojson && typeof j2.geojson === "object"
-          ? j2.geojson
+        j.geojson && typeof j.geojson === "object"
+          ? j.geojson
           : { type: "FeatureCollection", features: [] };
 
       setGeojson(safeGeojson);
-      setStats(j2.stats ?? null);
-      setLayerPicked(j2.layerPicked ?? null);
+      setDataset(j.dataset ?? null);
+      setNormalized(j.normalized ?? null);
+      setExplanation(j.explanation ?? null);
+
+      setDebug({ parsed: j.parsed, meta: j.meta });
     } catch (e: any) {
+      if (e?.name === "AbortError") return;
       setError(e?.message ?? "Something went wrong");
-      // still show map with empty basemap? optional:
       setGeojson({ type: "FeatureCollection", features: [] });
     } finally {
       setLoading(false);
+      inFlightRef.current = false;
     }
   }
 
@@ -191,7 +295,7 @@ export default function AiMapPage() {
             <input
               value={message}
               onChange={(e) => setMessage(e.target.value)}
-              placeholder='Try: "show all cbfma"'
+              placeholder='Try: "cbfma cenro alcala" or "cbfma po alias mufmpc"'
               className="input"
               onKeyDown={(e) => {
                 if (e.key === "Enter") runQuery();
@@ -212,7 +316,7 @@ export default function AiMapPage() {
 
           <div className="miniInfo">
             <div>
-              <b>Tip:</b> Try “cbfma in Cenro Sub Office” or “cbfma for renewal” or “largest cbfma”.
+              <b>Tip:</b> Try “cbfma alcala”, “cbfma cenro alcala”, “cbfma po alias mufmpc”, “pa aparri”.
             </div>
           </div>
         </div>
@@ -223,8 +327,8 @@ export default function AiMapPage() {
               <div className="topTitle">One Control Map</div>
               <div className="topSub">
                 {featureCount} feature(s)
-                {layerPicked?.length ? ` • ${layerPicked.join(", ")}` : ""}
-                {plan?.explanation ? ` • ${plan.explanation}` : ""}
+                {dataset ? ` • ${dataset}` : ""}
+                {normalized ? ` • ${normalized}` : ""}
               </div>
             </div>
 
@@ -247,11 +351,18 @@ export default function AiMapPage() {
                 Search
               </button>
             </div>
+
+            {/* ✅ ChatGPT-like assistant bubble */}
+            <AssistantBubble
+              dataset={dataset}
+              normalized={normalized}
+              explanation={explanation}
+              count={featureCount}
+            />
           </div>
 
           {error ? <div className="error errorTop">❌ {error}</div> : null}
 
-          {/* ✅ the map area must be relative + have height */}
           <div className="mapFull">
             <ResultMap geojson={geojson} />
           </div>
@@ -272,7 +383,6 @@ export default function AiMapPage() {
           color: #111;
         }
 
-        /* Center start view */
         .center{
           height: 100vh;
           display:flex;
@@ -344,7 +454,6 @@ export default function AiMapPage() {
           color: #555;
         }
 
-        /* Full map shell */
         .mapShell{
           height: 100vh;
           display:flex;
@@ -358,7 +467,7 @@ export default function AiMapPage() {
           background: #fff;
           display:flex;
           flex-direction:column;
-          gap: 10px;
+          gap: 12px; /* more space for assistant bubble */
           flex: 0 0 auto;
         }
 
@@ -388,14 +497,12 @@ export default function AiMapPage() {
           max-width: 1100px;
         }
 
-        /* ✅ critical: this area drives leaflet height */
         .mapFull{
           flex: 1 1 auto;
           position: relative;
-          min-height: 0; /* important with flex */
+          min-height: 0;
         }
 
-        /* Optional debug panel */
         .debugPanel{
           position: fixed;
           right: 12px;

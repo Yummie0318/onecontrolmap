@@ -32,13 +32,11 @@ function InvalidateOnEvents() {
   const map = useMap();
 
   useMapEvents({
-    // when the map gets shown after layout changes, invalidate
     resize: () => map.invalidateSize(),
     zoomend: () => map.invalidateSize(),
   });
 
   useEffect(() => {
-    // extra safety invalidations
     const t1 = setTimeout(() => map.invalidateSize(), 0);
     const t2 = setTimeout(() => map.invalidateSize(), 200);
     const t3 = setTimeout(() => map.invalidateSize(), 600);
@@ -52,15 +50,32 @@ function InvalidateOnEvents() {
   return null;
 }
 
+/** ✅ filter out null/invalid geometries so bounds won't throw */
+function safeGeojsonForBounds(geojson: any) {
+  const feats = geojson?.features;
+  if (!Array.isArray(feats)) return null;
+
+  const safe = feats.filter((f: any) => {
+    const g = f?.geometry;
+    if (!g) return false;
+    if (!g.type) return false;
+    if (!g.coordinates) return false;
+    return true;
+  });
+
+  if (safe.length === 0) return null;
+  return { ...geojson, features: safe };
+}
+
 function FitToGeoJson({ geojson }: { geojson: any | null }) {
   const map = useMap();
 
   useEffect(() => {
-    const feats = geojson?.features;
-    if (!Array.isArray(feats) || feats.length === 0) return;
+    const safe = geojson ? safeGeojsonForBounds(geojson) : null;
+    if (!safe) return;
 
     try {
-      const layer = L.geoJSON(geojson);
+      const layer = L.geoJSON(safe);
       const bounds = layer.getBounds();
       if (bounds?.isValid()) {
         map.fitBounds(bounds, { padding: [24, 24] });
@@ -130,14 +145,12 @@ export default function ResultMap({ geojson }: Props) {
           background: "#fff",
         }}
         whenReady={(ctx: any) => {
-          // ✅ guaranteed invalidate when leaflet says it's ready
           ctx?.target?.invalidateSize?.();
           setTimeout(() => ctx?.target?.invalidateSize?.(), 200);
         }}
       >
         <InvalidateOnEvents />
 
-        {/* ✅ Basemap toggle (you asked for this) */}
         <AnyLayersControl position="topright">
           <AnyLayersControl.BaseLayer checked name="Street (OSM)">
             <AnyTileLayer
@@ -172,22 +185,61 @@ export default function ResultMap({ geojson }: Props) {
             data={geojson}
             onEachFeature={(feature: any, layer: any) => {
               const p = feature?.properties ?? {};
-              const title = p.NAME_PO || p.CBFMA_NO || p.MUNI_CITY || "Feature";
 
-              const lines = Object.entries(p)
+              // ✅ Better titles for DENR datasets (CBFMA/PA/etc.)
+              const title =
+                p.PO_NAME ||
+                p.PO_ALIAS ||
+                p.PA ||
+                p.PA_1 ||
+                p.CBFMA_NO ||
+                p.MUNI_CITY ||
+                p.BARANGAY ||
+                "Feature";
+
+              // ✅ Show important fields first if present
+              const preferredKeys = [
+                "PO_NAME",
+                "PO_ALIAS",
+                "CBFMA_NO",
+                "CENRO",
+                "PENRO",
+                "MUNI_CITY",
+                "BARANGAY",
+                "AREA_HA",
+                "TENURE",
+                "PA",
+                "ACRONYM",
+                "TYPE",
+                "REMARKS",
+              ];
+
+              const rows: Array<[string, any]> = [];
+              for (const k of preferredKeys) {
+                if (p[k] !== undefined && p[k] !== null && String(p[k]).trim() !== "") {
+                  rows.push([k, p[k]]);
+                }
+              }
+
+              // add a few extra keys (but keep it short)
+              const extras = Object.entries(p)
+                .filter(([k, v]) => !preferredKeys.includes(k))
+                .filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== "")
+                .slice(0, Math.max(0, 12 - rows.length));
+
+              const lines = [...rows, ...(extras as any)]
                 .slice(0, 12)
                 .map(([k, v]) => `<b>${k}</b>: ${String(v)}`)
                 .join("<br/>");
 
               layer.bindPopup(
-                `<div style="min-width:220px"><b>${title}</b><br/>${lines}</div>`
+                `<div style="min-width:240px"><b>${title}</b><br/>${lines}</div>`
               );
             }}
           />
         ) : null}
       </AnyMapContainer>
 
-      {/* ✅ if tiles never report "load", show a helpful overlay */}
       {!tilesOk ? (
         <div
           style={{
@@ -210,7 +262,6 @@ export default function ResultMap({ geojson }: Props) {
         </div>
       ) : null}
 
-      {/* ✅ No results overlay */}
       {tilesOk && !hasData ? (
         <div
           style={{
@@ -228,7 +279,7 @@ export default function ResultMap({ geojson }: Props) {
         >
           <b>No results</b>
           <div style={{ color: "#555", marginTop: 2 }}>
-            Try another filter (example: “region ilike %cagayan%”).
+            Try: <i>“cbfma alcala”</i>, <i>“cbfma cenro alcala”</i>, or <i>“cbfma po alias mufmpc”</i>.
           </div>
         </div>
       ) : null}
