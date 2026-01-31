@@ -216,7 +216,7 @@ export default function AiMapPage() {
   const showMap = geojson !== null;
 
   const tips = useMemo(
-    () => ["cbfma alcala", "protected area", "cbfma po alias mufmpc", "smallest cbfma"],
+    () => ["cbfma for renewal", "protected area", "cbfma po alias mufmpc", "smallest cbfma"],
     []
   );
 
