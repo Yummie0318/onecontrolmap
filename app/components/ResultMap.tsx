@@ -1,3 +1,4 @@
+// C:\Users\Yummie03\Desktop\onemap\app\components\ResultMap.tsx
 "use client";
 
 import {
@@ -8,7 +9,7 @@ import {
   useMap,
   useMapEvents,
 } from "react-leaflet";
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -24,23 +25,46 @@ L.Icon.Default.mergeOptions({
   shadowUrl: (markerShadow as any).src ?? markerShadow,
 });
 
-type Props = {
-  geojson: any | null;
+export type MapLayerInput = {
+  id: string;
+  name?: string;
+  color?: string; // default layer color
+  geom_type?: string | null;
+  geojson: any; // FeatureCollection
 };
+
+type Props = {
+  geojson?: any | null; // legacy single-layer
+  layers?: MapLayerInput[]; // multi-layer
+};
+
+const DEFAULT_FALLBACK_COLOR = "#0b1220";
+
+function safeInvalidate(map: any) {
+  try {
+    const c = map?.getContainer?.();
+    if (!c) return;
+    map.invalidateSize();
+  } catch {
+    // ignore
+  }
+}
 
 function InvalidateOnEvents() {
   const map = useMap();
 
   useMapEvents({
-    resize: () => map.invalidateSize(),
-    zoomend: () => map.invalidateSize(),
+    resize: () => safeInvalidate(map),
+    zoomend: () => safeInvalidate(map),
   });
 
   useEffect(() => {
-    const t1 = setTimeout(() => map.invalidateSize(), 0);
-    const t2 = setTimeout(() => map.invalidateSize(), 200);
-    const t3 = setTimeout(() => map.invalidateSize(), 600);
+    let alive = true;
+    const t1 = setTimeout(() => alive && safeInvalidate(map), 0);
+    const t2 = setTimeout(() => alive && safeInvalidate(map), 200);
+    const t3 = setTimeout(() => alive && safeInvalidate(map), 600);
     return () => {
+      alive = false;
       clearTimeout(t1);
       clearTimeout(t2);
       clearTimeout(t3);
@@ -71,6 +95,9 @@ function FitToGeoJson({ geojson }: { geojson: any | null }) {
   const map = useMap();
 
   useEffect(() => {
+    let alive = true;
+    let t: any = null;
+
     const safe = geojson ? safeGeojsonForBounds(geojson) : null;
     if (!safe) return;
 
@@ -79,34 +106,198 @@ function FitToGeoJson({ geojson }: { geojson: any | null }) {
       const bounds = layer.getBounds();
       if (bounds?.isValid()) {
         map.fitBounds(bounds, { padding: [24, 24] });
-        setTimeout(() => map.invalidateSize(), 120);
+        t = setTimeout(() => {
+          if (!alive) return;
+          safeInvalidate(map);
+        }, 120);
       }
     } catch (err) {
       console.warn("Failed to fit bounds:", err);
     }
+
+    return () => {
+      alive = false;
+      if (t) clearTimeout(t);
+    };
   }, [geojson, map]);
 
   return null;
 }
 
-export default function ResultMap({ geojson }: Props) {
+function FitToMany({ layers }: { layers: MapLayerInput[] }) {
+  const map = useMap();
+
+  useEffect(() => {
+    let alive = true;
+    let t: any = null;
+
+    if (!layers.length) return;
+
+    try {
+      let merged: L.LatLngBounds | null = null;
+
+      for (const l of layers) {
+        const safe = safeGeojsonForBounds(l.geojson);
+        if (!safe) continue;
+
+        const gj = L.geoJSON(safe);
+        const b = gj.getBounds();
+        if (!b?.isValid()) continue;
+
+        merged = merged ? merged.extend(b) : b;
+      }
+
+      if (merged && merged.isValid()) {
+        map.fitBounds(merged, { padding: [24, 24] });
+
+        t = setTimeout(() => {
+          if (!alive) return;
+          safeInvalidate(map);
+        }, 120);
+      }
+    } catch (err) {
+      console.warn("Failed to fit bounds:", err);
+    }
+
+    return () => {
+      alive = false;
+      if (t) clearTimeout(t);
+    };
+  }, [layers, map]);
+
+  return null;
+}
+
+function styleForColor(color: string) {
+  return {
+    color, // stroke
+    weight: 2.5,
+    opacity: 0.95,
+    fillColor: color, // polygon fill
+    fillOpacity: 0.28,
+  } as L.PathOptions;
+}
+
+function pointStyle(color: string) {
+  return {
+    radius: 5,
+    color,
+    weight: 2,
+    opacity: 0.95,
+    fillColor: color,
+    fillOpacity: 0.85,
+  } as L.CircleMarkerOptions;
+}
+
+/** ✅ pick per-feature override first, else fallback to layer color */
+function getFeatureColor(feature: any, layerColor: string) {
+  const c = feature?.properties?.__color;
+  if (typeof c === "string" && c.trim()) return c.trim();
+  return layerColor;
+}
+
+function bindPopupDENR(feature: any, layer: any) {
+  const p = feature?.properties ?? {};
+
+  const title =
+    p.PO_NAME ||
+    p.PO_ALIAS ||
+    p.PA ||
+    p.PA_1 ||
+    p.CBFMA_NO ||
+    p.MUNI_CITY ||
+    p.BARANGAY ||
+    "Feature";
+
+  const preferredKeys = [
+    "PO_NAME",
+    "PO_ALIAS",
+    "CBFMA_NO",
+    "CENRO",
+    "PENRO",
+    "MUNI_CITY",
+    "BARANGAY",
+    "AREA_HA",
+    "TENURE",
+    "PA",
+    "ACRONYM",
+    "TYPE",
+    "REMARKS",
+  ];
+
+  const rows: Array<[string, any]> = [];
+  for (const k of preferredKeys) {
+    if (p[k] !== undefined && p[k] !== null && String(p[k]).trim() !== "") {
+      rows.push([k, p[k]]);
+    }
+  }
+
+  const extras = Object.entries(p)
+    .filter(([k]) => !preferredKeys.includes(k))
+    .filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== "")
+    .slice(0, Math.max(0, 12 - rows.length));
+
+  const lines = [...rows, ...(extras as any)]
+    .slice(0, 12)
+    .map(([k, v]) => `<b>${k}</b>: ${String(v)}`)
+    .join("<br/>");
+
+  layer.bindPopup(
+    `<div style="min-width:240px"><b>${title}</b><br/>${lines}</div>`
+  );
+}
+
+export default function ResultMap(props: Props) {
   // React 19 typings workaround
   const AnyMapContainer = MapContainer as any;
   const AnyTileLayer = TileLayer as any;
   const AnyGeoJSON = GeoJSON as any;
   const AnyLayersControl = LayersControl as any;
 
-  const feats = geojson?.features;
-  const hasData = Array.isArray(feats) && feats.length > 0;
+  // ✅ Normalize layers: prefer layers[], fallback to single geojson
+  const normalizedLayers: MapLayerInput[] = useMemo(() => {
+    if (props.layers?.length) {
+      return props.layers
+        .filter((l) => l?.geojson?.type === "FeatureCollection")
+        .map((l) => ({
+          ...l,
+          color: l.color || DEFAULT_FALLBACK_COLOR,
+        }));
+    }
 
-  // ✅ force the whole map to remount when query changes (very reliable)
+    if (props.geojson?.type === "FeatureCollection") {
+      return [
+        {
+          id: "single",
+          name: "Layer",
+          color: DEFAULT_FALLBACK_COLOR,
+          geojson: props.geojson,
+        },
+      ];
+    }
+
+    return [];
+  }, [props.layers, props.geojson]);
+
+  const hasAnyData = useMemo(() => {
+    return normalizedLayers.some(
+      (l) => Array.isArray(l.geojson?.features) && l.geojson.features.length > 0
+    );
+  }, [normalizedLayers]);
+
+  // ✅ key should change when caller forces rerender via parent "key"
+  // but also include layer ids + counts to avoid stale GeoJSON layers
   const mapKey = useMemo(() => {
-    const n = Array.isArray(feats) ? feats.length : 0;
-    const firstId = feats?.[0]?.id ?? feats?.[0]?.properties?.id ?? "x";
-    return `map-${n}-${String(firstId)}`;
-  }, [feats]);
+    const ids = normalizedLayers.map((l) => l.id).join("|");
+    const counts = normalizedLayers
+      .map((l) =>
+        Array.isArray(l.geojson?.features) ? l.geojson.features.length : 0
+      )
+      .join(",");
+    return `map-${ids}-${counts}`;
+  }, [normalizedLayers]);
 
-  // ✅ track tile loading to confirm it is painting
+  // ✅ track tile loading
   const [tilesOk, setTilesOk] = useState(false);
   const tileOkRef = useRef(false);
 
@@ -121,12 +312,6 @@ export default function ResultMap({ geojson }: Props) {
       console.warn("Tile error:", e);
     },
   } as any;
-
-  const geoKey = useMemo(() => {
-    if (!hasData) return "empty";
-    const firstId = feats?.[0]?.id ?? feats?.[0]?.properties?.id ?? "x";
-    return `geo-${feats.length}-${String(firstId)}`;
-  }, [hasData, feats]);
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
@@ -177,67 +362,64 @@ export default function ResultMap({ geojson }: Props) {
           </AnyLayersControl.BaseLayer>
         </AnyLayersControl>
 
-        <FitToGeoJson geojson={geojson} />
+        {/* ✅ fit bounds */}
+        {props.layers?.length ? (
+          <FitToMany layers={normalizedLayers} />
+        ) : (
+          <FitToGeoJson geojson={props.geojson ?? null} />
+        )}
 
-        {hasData ? (
-          <AnyGeoJSON
-            key={geoKey}
-            data={geojson}
-            onEachFeature={(feature: any, layer: any) => {
-              const p = feature?.properties ?? {};
+        {/* ✅ Render each layer (per-feature color override supported via properties.__color) */}
+        {normalizedLayers.map((layer) => {
+          const feats = layer.geojson?.features;
+          const hasData = Array.isArray(feats) && feats.length > 0;
+          if (!hasData) return null;
 
-              // ✅ Better titles for DENR datasets (CBFMA/PA/etc.)
-              const title =
-                p.PO_NAME ||
-                p.PO_ALIAS ||
-                p.PA ||
-                p.PA_1 ||
-                p.CBFMA_NO ||
-                p.MUNI_CITY ||
-                p.BARANGAY ||
-                "Feature";
+          const baseColor = layer.color || DEFAULT_FALLBACK_COLOR;
 
-              // ✅ Show important fields first if present
-              const preferredKeys = [
-                "PO_NAME",
-                "PO_ALIAS",
-                "CBFMA_NO",
-                "CENRO",
-                "PENRO",
-                "MUNI_CITY",
-                "BARANGAY",
-                "AREA_HA",
-                "TENURE",
-                "PA",
-                "ACRONYM",
-                "TYPE",
-                "REMARKS",
-              ];
+          // key includes feature count only (parent already remounts ResultMapClient with key)
+          const geoKey = `geo-${layer.id}-${feats.length}`;
 
-              const rows: Array<[string, any]> = [];
-              for (const k of preferredKeys) {
-                if (p[k] !== undefined && p[k] !== null && String(p[k]).trim() !== "") {
-                  rows.push([k, p[k]]);
-                }
-              }
+          return (
+            <AnyGeoJSON
+              key={geoKey}
+              data={layer.geojson}
+              // ✅ IMPORTANT: use feature to get per-feature color
+              style={(feature: any) => {
+                const c = getFeatureColor(feature, baseColor);
+                return styleForColor(c);
+              }}
+              // ✅ IMPORTANT: points also use per-feature override
+              pointToLayer={(feature: any, latlng: any) => {
+                const c = getFeatureColor(feature, baseColor);
+                return L.circleMarker(latlng, pointStyle(c));
+              }}
+              onEachFeature={(feature: any, leafletLayer: any) => {
+                bindPopupDENR(feature, leafletLayer);
 
-              // add a few extra keys (but keep it short)
-              const extras = Object.entries(p)
-                .filter(([k, v]) => !preferredKeys.includes(k))
-                .filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== "")
-                .slice(0, Math.max(0, 12 - rows.length));
+                // Optional: hover highlight while keeping the same color
+                leafletLayer.on?.("mouseover", () => {
+                  const c = getFeatureColor(feature, baseColor);
+                  try {
+                    leafletLayer.setStyle?.({
+                      ...styleForColor(c),
+                      weight: 4,
+                      fillOpacity: 0.38,
+                    });
+                    leafletLayer.bringToFront?.();
+                  } catch {}
+                });
 
-              const lines = [...rows, ...(extras as any)]
-                .slice(0, 12)
-                .map(([k, v]) => `<b>${k}</b>: ${String(v)}`)
-                .join("<br/>");
-
-              layer.bindPopup(
-                `<div style="min-width:240px"><b>${title}</b><br/>${lines}</div>`
-              );
-            }}
-          />
-        ) : null}
+                leafletLayer.on?.("mouseout", () => {
+                  const c = getFeatureColor(feature, baseColor);
+                  try {
+                    leafletLayer.setStyle?.(styleForColor(c));
+                  } catch {}
+                });
+              }}
+            />
+          );
+        })}
       </AnyMapContainer>
 
       {!tilesOk ? (
@@ -262,7 +444,7 @@ export default function ResultMap({ geojson }: Props) {
         </div>
       ) : null}
 
-      {tilesOk && !hasData ? (
+      {tilesOk && !hasAnyData ? (
         <div
           style={{
             position: "absolute",
@@ -279,7 +461,8 @@ export default function ResultMap({ geojson }: Props) {
         >
           <b>No results</b>
           <div style={{ color: "#555", marginTop: 2 }}>
-            Try: <i>“cbfma alcala”</i>, <i>“cbfma cenro alcala”</i>, or <i>“cbfma po alias mufmpc”</i>.
+            Turn on a layer from the list (checkbox), or try searching a layer
+            name.
           </div>
         </div>
       ) : null}

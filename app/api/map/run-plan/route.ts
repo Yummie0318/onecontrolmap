@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { pool } from "@/lib/db";
 
 type Op = "=" | "!=" | ">" | ">=" | "<" | "<=" | "ilike";
-type DatasetKey = "CBFMA" | "PA" | "UNKNOWN";
+type DatasetKey = "CBFMA" | "PA" | "CSC" | "UNKNOWN";
 
 type Filter = { field: string; op: Op; value: any };
 
@@ -99,6 +99,8 @@ const STRUCTURED_FIELDS = new Set([
   "BARANGAY",
   "PA",
   "PA_1",
+  // (optional) CSC-specific structured fields could be added later if needed:
+  // "CSC_NUMBER","NAME_CSC","WATERSHED","DISTRICT","LC_NO","HOLD_ADD","CONT_PERS","YR_ASSESS"
 ]);
 
 function isStructuredFieldName(field: string) {
@@ -126,6 +128,8 @@ function datasetPatterns(dataset: DatasetKey) {
       return ["TEN_CBFMA%", "CBFMA%", "CBFM%", "MERGE_CBFM%"];
     case "PA":
       return ["PA_%", "PA%", "PROTECTED_AREA%", "PROTECTEDAREA%"];
+    case "CSC":
+      return ["CSC_%", "CSC%"]; // ✅ matches CSC_Alcala, CSC_Aparri, etc.
     default:
       return ["%"];
   }
@@ -147,6 +151,7 @@ function stripCommandWordsForKeyword(raw: string) {
   return s
     .replace(/\b(cbfma|cbfm|tenure)\b/g, " ")
     .replace(/\b(pa|protected\s+area(s)?|protectedarea(s)?|protected|nipas)\b/g, " ")
+    .replace(/\b(csc|csc_number|csc_no|csc\s*number|csc\s*no)\b/g, " ") // ✅ remove CSC tokens
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -233,18 +238,20 @@ function resolveFieldCandidates(requested: string, availableFields: string[]) {
   return [...exact, ...starts, ...contains].slice(0, 6);
 }
 
-/* ---------------- dataset auto-pick (CBFMA vs PA only) ---------------- */
+/* ---------------- dataset auto-pick (CBFMA vs PA vs CSC) ---------------- */
 
 async function autoPickDatasetFromDB(rawQuery: string): Promise<DatasetKey> {
   const keep = stripCommandWordsKeepDataset(rawQuery);
+
   if (/\b(cbfma|cbfm|tenure)\b/i.test(keep)) return "CBFMA";
+  if (/\b(csc|csc_number|csc_no|csc\s*number|csc\s*no)\b/i.test(keep)) return "CSC";
   if (/\b(pa|protected\s+area(s)?|protectedarea(s)?|protected|nipas)\b/i.test(keep)) return "PA";
 
   const tokens = tokenizeMeaningful(rawQuery);
   if (!tokens.length) return "UNKNOWN";
 
   const like = `%${normalizeValue(tokens[0])}%`;
-  const candidates: DatasetKey[] = ["CBFMA", "PA"];
+  const candidates: DatasetKey[] = ["CBFMA", "PA", "CSC"];
 
   let best: { ds: DatasetKey; score: number } = { ds: "UNKNOWN", score: 0 };
 
@@ -412,8 +419,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Missing plan.layerName." }, { status: 400 });
     }
 
-    // only support CBFMA + PA
-    let resolvedLayerName: DatasetKey = ["CBFMA", "PA"].includes(plan.layerName) ? plan.layerName : "UNKNOWN";
+    // support CBFMA + PA + CSC
+    let resolvedLayerName: DatasetKey = ["CBFMA", "PA", "CSC"].includes(plan.layerName) ? plan.layerName : "UNKNOWN";
 
     if ((resolvedLayerName === "UNKNOWN" || !resolvedLayerName) && rawQuery) {
       const picked = await autoPickDatasetFromDB(rawQuery);
@@ -561,66 +568,63 @@ export async function POST(req: Request) {
       }
     }
 
-// FEATURES MODE (✅ fix: make geom valid + 2D + 4326 so it will display)
-const sql = `
-  WITH filtered AS (
-    SELECT
-      CASE
-        WHEN geom IS NULL THEN NULL
-        WHEN ST_SRID(geom) = 4326 THEN ST_Force2D(ST_MakeValid(geom))
-        WHEN ST_SRID(geom) = 0 THEN ST_Force2D(ST_MakeValid(ST_SetSRID(geom, 4326)))
-        ELSE ST_Force2D(ST_MakeValid(ST_Transform(geom, 4326)))
-      END AS geom4326,
-      props
-    FROM public.features
-    WHERE ${clauses.join(" AND ")}
-    ${orderSql}
-    LIMIT ${limit}
-  )
-  SELECT jsonb_build_object(
-    'type', 'FeatureCollection',
-    'features', COALESCE(
-      jsonb_agg(
-        jsonb_build_object(
-          'type','Feature',
-          'geometry', CASE
-            WHEN geom4326 IS NULL THEN NULL
-            ELSE ST_AsGeoJSON(geom4326)::jsonb
-          END,
-          'properties', props
+    // FEATURES MODE (✅ fix: make geom valid + 2D + 4326 so it will display)
+    const sql = `
+      WITH filtered AS (
+        SELECT
+          CASE
+            WHEN geom IS NULL THEN NULL
+            WHEN ST_SRID(geom) = 4326 THEN ST_Force2D(ST_MakeValid(geom))
+            WHEN ST_SRID(geom) = 0 THEN ST_Force2D(ST_MakeValid(ST_SetSRID(geom, 4326)))
+            ELSE ST_Force2D(ST_MakeValid(ST_Transform(geom, 4326)))
+          END AS geom4326,
+          props
+        FROM public.features
+        WHERE ${clauses.join(" AND ")}
+        ${orderSql}
+        LIMIT ${limit}
+      )
+      SELECT jsonb_build_object(
+        'type', 'FeatureCollection',
+        'features', COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'type','Feature',
+              'geometry', CASE
+                WHEN geom4326 IS NULL THEN NULL
+                ELSE ST_AsGeoJSON(geom4326)::jsonb
+              END,
+              'properties', props
+            )
+          ),
+          '[]'::jsonb
         )
-      ),
-      '[]'::jsonb
-    )
-  ) AS geojson
-  FROM filtered;
-`;
-
+      ) AS geojson
+      FROM filtered;
+    `;
 
     const r = await pool.query(sql, [...params, ...orderParams]);
     const gj = r.rows?.[0]?.geojson ?? { type: "FeatureCollection", features: [] };
     const featureCount = Array.isArray(gj?.features) ? gj.features.length : 0;
 
     const nullGeomCount = Array.isArray(gj?.features)
-  ? gj.features.filter((f: any) => !f?.geometry).length
-  : 0;
+      ? gj.features.filter((f: any) => !f?.geometry).length
+      : 0;
 
-
-  return NextResponse.json({
-    ok: true,
-    layerPicked,
-    stats: { featureCount, nullGeomCount },
-    geojson: gj,
-    debug: {
-      rawQueryReceived: rawQuery,
-      resolvedLayerName,
-      availableFieldsCount: availableFields.length,
-      effectivePlanFilters: effectivePlan.filters,
-      effectivePlanAnyOf: effectivePlan.anyOf,
-      orderBy: effectivePlan.orderBy,
-    },
-  });
-  
+    return NextResponse.json({
+      ok: true,
+      layerPicked,
+      stats: { featureCount, nullGeomCount },
+      geojson: gj,
+      debug: {
+        rawQueryReceived: rawQuery,
+        resolvedLayerName,
+        availableFieldsCount: availableFields.length,
+        effectivePlanFilters: effectivePlan.filters,
+        effectivePlanAnyOf: effectivePlan.anyOf,
+        orderBy: effectivePlan.orderBy,
+      },
+    });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message ?? "Error" }, { status: 500 });
   }

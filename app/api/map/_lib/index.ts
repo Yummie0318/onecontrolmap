@@ -4,3 +4,4 @@ export { searchDatasetGeoJSON } from "./core";
 
 export { parseCbfmaMessage } from "./cbfma";
 export { parsePaMessage } from "./pa";
+export { parseCscMessage } from "./csc";

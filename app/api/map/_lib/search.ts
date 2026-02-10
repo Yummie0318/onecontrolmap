@@ -1,6 +1,7 @@
 import { DatasetKey, normalizeText, searchDatasetGeoJSON } from "./core";
 import { parseCbfmaMessage } from "./cbfma";
 import { parsePaMessage } from "./pa";
+import { parseCscMessage } from "./csc";
 
 /** keep your old function name */
 export function detectDataset(message: string): DatasetKey {
@@ -8,6 +9,8 @@ export function detectDataset(message: string): DatasetKey {
 
   // explicit dataset words
   if (/\bcbfma\b|\bcbfm\b|\btenure\b/.test(t)) return "CBFMA";
+  if (/\bcsc\b|\bcsc_number\b|\bcsc_no\b|\bcsc\s*number\b|\bcsc\s*no\b|\bcommunity\s*stewardship\b|\bstewardship\s*contract\b/.test(t))
+    return "CSC";
   if (/\bpa\b|\bprotected\s*area(s)?\b|\bprotectedarea(s)?\b|\bnipas\b/.test(t)) return "PA";
   if (/\bngp\b|\bnational\s*greening\b/.test(t)) return "NGP";
   if (/\bsifma\b/.test(t)) return "SIFMA";
@@ -30,6 +33,7 @@ export function detectDataset(message: string): DatasetKey {
 export function parseUserMessageToQuery(dataset: DatasetKey, message: string) {
   if (dataset === "CBFMA") return parseCbfmaMessage(message);
   if (dataset === "PA") return parsePaMessage(message);
+  if (dataset === "CSC") return parseCscMessage(message);
 
   // fallback: keyword-only
   const cleaned = normalizeText(message);

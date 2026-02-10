@@ -1,6 +1,6 @@
 import { pool } from "@/lib/db";
 
-export type DatasetKey = "CBFMA" | "PA" | "NGP" | "SIFMA" | "FIRE" | "UNKNOWN";
+export type DatasetKey = "CBFMA" | "PA" | "CSC" | "NGP" | "SIFMA" | "FIRE" | "UNKNOWN";
 
 /** intent flags that can apply to any dataset */
 export type IntentFlags = {
@@ -76,9 +76,11 @@ export function extractAfterKeyword(cleaned: string, key: string) {
   const after = cleaned.slice(idx + key.length).trim();
   if (!after) return null;
 
+  // Expanded stopwords to support CSC parsing (prevents values from swallowing the next field keyword)
   const stop = after.match(
-    /\b(cenro|penro|muni_city|municipality|barangay|po_alias|pa_alias|alias|acronym|name_of_pa|name|province|region|type|remarks|po)\b/
+    /\b(cenro|penro|district|muni_city|municipality|muni|city|barangay|po_alias|pa_alias|alias|acronym|name_of_pa|name|name_csc|csc_number|csc_no|csc|lc_no|psgc|province|region|type|status|tenure|watershed|cont_pers|hold_add|remarks|yr_assess|po)\b/
   );
+
   const val = stop ? after.slice(0, stop.index).trim() : after.trim();
   return val || null;
 }
@@ -205,7 +207,11 @@ export async function searchDatasetGeoJSON(args: {
       [layer.name, finalLimit]
     );
 
-    return { mode: "layer" as const, layer: layer.name, geojson: r.rows[0]?.geojson ?? { type: "FeatureCollection", features: [] } };
+    return {
+      mode: "layer" as const,
+      layer: layer.name,
+      geojson: r.rows[0]?.geojson ?? { type: "FeatureCollection", features: [] },
+    };
   }
 
   if (parsed.mode === "field") {
@@ -226,7 +232,11 @@ export async function searchDatasetGeoJSON(args: {
       [dataset, parsed.field, parsed.value, finalLimit]
     );
 
-    return { mode: "field" as const, filter: parsed, geojson: r.rows[0]?.geojson ?? { type: "FeatureCollection", features: [] } };
+    return {
+      mode: "field" as const,
+      filter: parsed,
+      geojson: r.rows[0]?.geojson ?? { type: "FeatureCollection", features: [] },
+    };
   }
 
   const r = await pool.query(
@@ -246,5 +256,9 @@ export async function searchDatasetGeoJSON(args: {
     [dataset, parsed.keyword, finalLimit]
   );
 
-  return { mode: "keyword" as const, keyword: parsed.keyword, geojson: r.rows[0]?.geojson ?? { type: "FeatureCollection", features: [] } };
+  return {
+    mode: "keyword" as const,
+    keyword: parsed.keyword,
+    geojson: r.rows[0]?.geojson ?? { type: "FeatureCollection", features: [] },
+  };
 }

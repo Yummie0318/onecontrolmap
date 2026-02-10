@@ -1,0 +1,514 @@
+// C:\Users\Yummie03\Desktop\onemap\app\login\page.tsx
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import Image from "next/image";
+
+type ToastKind = "success" | "error" | "info";
+
+function cx(...cls: Array<string | false | null | undefined>) {
+  return cls.filter(Boolean).join(" ");
+}
+
+function Toast({
+  kind,
+  title,
+  message,
+  onClose,
+}: {
+  kind: ToastKind;
+  title: string;
+  message?: string;
+  onClose: () => void;
+}) {
+  return (
+    <div className={cx("toast", kind)} role="status" aria-live="polite">
+      <div className="toastDot" aria-hidden="true" />
+      <div className="toastText">
+        <div className="toastTitle">{title}</div>
+        {message ? <div className="toastMsg">{message}</div> : null}
+      </div>
+      <button className="toastX" onClick={onClose} type="button" aria-label="Close">
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function EyeIcon({ open }: { open: boolean }) {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      {open ? (
+        <>
+          <path
+            d="M2.1 12s3.6-7 9.9-7 9.9 7 9.9 7-3.6 7-9.9 7-9.9-7-9.9-7Z"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </>
+      ) : (
+        <>
+          <path
+            d="M2.1 12s3.6-7 9.9-7c2.1 0 4 0.6 5.5 1.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M21.9 12s-3.6 7-9.9 7c-2.2 0-4.1-.6-5.7-1.6"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M3 3l18 18"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </>
+      )}
+    </svg>
+  );
+}
+
+export default function LoginPage() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const [showPw, setShowPw] = useState(false);
+  const [remember, setRemember] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const [toast, setToast] = useState<{ kind: ToastKind; title: string; message?: string } | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const reason = params.get("reason");
+    if (reason === "expired") setToast({ kind: "info", title: "Session expired", message: "Please login again." });
+    if (reason === "logout") setToast({ kind: "success", title: "Logged out", message: "You are now signed out." });
+  }, []);
+
+  const canSubmit = useMemo(() => {
+    if (!email.trim()) return false;
+    if (!password.trim()) return false;
+    return true;
+  }, [email, password]);
+
+  function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setBusy(true);
+
+    // UI only (no backend yet)
+    setTimeout(() => {
+      setBusy(false);
+      setToast({ kind: "info", title: "UI ready", message: "Backend not connected yet." });
+    }, 650);
+  }
+
+  function goGuest() {
+    window.location.href = "http://localhost:3000/viewmap";
+  }
+
+  return (
+    <div className="page">
+      <style>{`
+        :root{
+          --bg0:#ffffff;
+          --bg1:#f6f8fb;
+
+          --text:#0b1220;
+          --muted: rgba(11,18,32,.60);
+
+          --stroke: rgba(11,18,32,.10);
+          --stroke2: rgba(11,18,32,.18);
+
+          --shadow: 0 14px 40px rgba(11,18,32,.10);
+          --shadow2: 0 30px 90px rgba(11,18,32,.14);
+
+          --primary:#0f7a3a;
+          --primaryBg: rgba(15,122,58,.12);
+
+          --blue:#1166cc;
+          --blueBg: rgba(17,102,204,.10);
+        }
+
+        html, body { height:100%; margin:0; }
+        body{
+          color: var(--text);
+          background:
+            radial-gradient(900px 560px at 12% 0%, rgba(15,122,58,.12), transparent 60%),
+            radial-gradient(900px 560px at 88% 18%, rgba(17,102,204,.10), transparent 60%),
+            linear-gradient(180deg, var(--bg0), var(--bg1));
+        }
+        *{ box-sizing:border-box; }
+        ::selection{ background: rgba(15,122,58,.18); }
+
+        .page{
+          min-height: 100vh;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding: 24px 14px;
+        }
+
+        /* ✅ Only keep the box (single card) */
+        .card{
+          width: min(520px, 100%);
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.90);
+          backdrop-filter: blur(18px);
+          box-shadow: var(--shadow2);
+          border-radius: 26px;
+          overflow:hidden;
+          padding: 22px;
+        }
+
+        .topRow{
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:12px;
+          margin-bottom: 14px;
+        }
+
+        /* ✅ Logo + App name (clean, inside card) */
+        .brand{
+          display:flex;
+          align-items:center;
+          gap:10px;
+          min-width:0;
+        }
+        .brandLogo{
+          width: 38px; height: 38px;
+          border-radius: 14px;
+          border: 1px solid rgba(11,18,32,.10);
+          background: rgba(255,255,255,.92);
+          box-shadow: 0 14px 34px rgba(11,18,32,.10);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          overflow:hidden;
+          flex: 0 0 auto;
+        }
+        .brandTxt{ min-width:0; display:flex; flex-direction:column; line-height:1.15; }
+        .brandTitle{
+          font-size: 13px;
+          font-weight: 850;
+          letter-spacing: -.2px;
+          white-space:nowrap;
+          overflow:hidden;
+          text-overflow: ellipsis;
+        }
+        .brandSub{
+          font-size: 11px;
+          font-weight: 600;
+          color: var(--muted);
+          white-space:nowrap;
+          overflow:hidden;
+          text-overflow: ellipsis;
+        }
+
+        .badge{
+          font-size: 12px;
+          font-weight: 650;
+          color: rgba(11,18,32,.78);
+          border: 1px solid var(--stroke);
+          padding: 7px 10px;
+          border-radius: 999px;
+          background: rgba(255,255,255,.84);
+          white-space:nowrap;
+          flex: 0 0 auto;
+        }
+
+        .header{
+          margin-top: 4px;
+          margin-bottom: 12px;
+        }
+        .formTitle{
+          font-size: 18px;
+          font-weight: 900;
+          letter-spacing: -0.35px;
+          margin: 0;
+        }
+        .formSub{
+          font-size: 12px;
+          font-weight: 600;
+          color: rgba(11,18,32,.62);
+          margin-top: 4px;
+        }
+
+        .field{
+          display:flex;
+          flex-direction:column;
+          gap:8px;
+          margin-top: 12px;
+        }
+        label{
+          font-size: 12px;
+          font-weight: 750;
+          color: rgba(11,18,32,.78);
+        }
+
+        .inputWrap{
+          display:flex;
+          align-items:center;
+          gap:10px;
+          padding: 10px 12px;
+          border-radius: 16px;
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.94);
+          transition: box-shadow .15s ease, border-color .15s ease, transform .10s ease;
+        }
+        .inputWrap:focus-within{
+          border-color: rgba(15,122,58,.35);
+          box-shadow: 0 0 0 5px rgba(15,122,58,.10);
+        }
+        input{
+          width:100%;
+          border:0;
+          outline:0;
+          background: transparent;
+          color: var(--text);
+          font-size: 13px;
+          font-weight: 650;
+        }
+        input::placeholder{ color: rgba(11,18,32,.42); font-weight: 550; }
+
+        .iconMiniBtn{
+          width: 36px;
+          height: 36px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          border-radius: 12px;
+          border: 1px solid rgba(11,18,32,.10);
+          background: rgba(255,255,255,.92);
+          cursor: pointer;
+          transition: transform .10s ease, box-shadow .15s ease, border-color .15s ease;
+          color: rgba(11,18,32,.78);
+        }
+        .iconMiniBtn:hover{
+          transform: translateY(-1px);
+          border-color: var(--stroke2);
+          box-shadow: 0 12px 28px rgba(11,18,32,.10);
+        }
+        .iconMiniBtn:active{ transform: translateY(0); }
+
+        .row2{
+          margin-top: 12px;
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:10px;
+          flex-wrap:wrap;
+        }
+        .check{
+          display:flex;
+          align-items:center;
+          gap:10px;
+          font-size: 12px;
+          font-weight: 650;
+          color: rgba(11,18,32,.68);
+          user-select:none;
+        }
+        .check input{ width: 16px; height:16px; accent-color: var(--primary); }
+
+        .btn{
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.92);
+          color: var(--text);
+          font-weight: 800;
+          cursor: pointer;
+          display:inline-flex;
+          align-items:center;
+          gap:10px;
+          user-select:none;
+          transition: transform .10s ease, border-color .15s ease, box-shadow .15s ease, background .15s ease;
+          padding: 10px 12px;
+          border-radius: 16px;
+          font-size: 13px;
+          justify-content:center;
+        }
+        .btn:hover{
+          border-color: var(--stroke2);
+          box-shadow: 0 12px 28px rgba(11,18,32,.10);
+          transform: translateY(-1px);
+        }
+        .btn:active{ transform: translateY(0); }
+        .btn[disabled]{ opacity: .55; cursor:not-allowed; transform:none; box-shadow:none; }
+
+        .btnPrimary{
+          border-color: rgba(15,122,58,.26);
+          background: linear-gradient(180deg, rgba(15,122,58,.12), rgba(255,255,255,.92));
+        }
+        .btnPrimary strong{ font-weight: 900; }
+        .btnWide{ width:100%; margin-top: 12px; }
+
+        .help{
+          margin-top: 12px;
+          padding-top: 12px;
+          border-top: 1px solid rgba(11,18,32,.08);
+          font-size: 12px;
+          font-weight: 600;
+          color: rgba(11,18,32,.62);
+          display:flex;
+          justify-content:space-between;
+          gap:10px;
+          flex-wrap:wrap;
+        }
+
+        /* Toast */
+        .toast{
+          position: fixed;
+          top: 14px;
+          left: 50%;
+          transform: translateX(-50%);
+          z-index: 65000;
+          width: min(520px, calc(100vw - 20px));
+          padding: 10px 12px;
+          border-radius: 999px;
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.92);
+          box-shadow: 0 18px 52px rgba(11,18,32,.14);
+          display:flex;
+          align-items:center;
+          gap:10px;
+          backdrop-filter: blur(14px);
+        }
+        .toastDot{
+          width: 10px; height: 10px; border-radius: 999px;
+          border: 1px solid rgba(11,18,32,.16);
+          background: rgba(11,18,32,.08);
+          box-shadow: 0 0 0 8px rgba(11,18,32,.04);
+        }
+        .toast.success .toastDot{ background: rgba(18,161,80,.70); box-shadow: 0 0 0 8px rgba(18,161,80,.14); border-color: rgba(18,161,80,.28); }
+        .toast.error .toastDot{ background: rgba(217,45,32,.70); box-shadow: 0 0 0 8px rgba(217,45,32,.14); border-color: rgba(217,45,32,.28); }
+        .toast.info .toastDot{ background: rgba(17,102,204,.70); box-shadow: 0 0 0 8px rgba(17,102,204,.14); border-color: rgba(17,102,204,.28); }
+
+        .toastText{ min-width:0; display:flex; flex-direction:column; gap:1px; }
+        .toastTitle{ font-size: 12px; font-weight: 800; }
+        .toastMsg{ font-size: 12px; font-weight: 650; color: rgba(11,18,32,.62); white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
+        .toastX{
+          margin-left:auto;
+          border: 0;
+          background: transparent;
+          cursor:pointer;
+          width: 34px; height: 34px;
+          border-radius: 999px;
+          display:flex; align-items:center; justify-content:center;
+          color: rgba(11,18,32,.70);
+        }
+        .toastX:hover{ background: rgba(11,18,32,.06); }
+
+        /* Mobile tweaks */
+        @media (max-width: 420px){
+          .card{ padding: 18px; border-radius: 22px; }
+          .badge{ display:none; } /* keeps header clean on tiny screens */
+        }
+      `}</style>
+
+      {toast ? (
+        <Toast kind={toast.kind} title={toast.title} message={toast.message} onClose={() => setToast(null)} />
+      ) : null}
+
+      {/* ✅ ONLY THE BOX */}
+      <div className="card" role="main" aria-label="Login">
+        <div className="topRow">
+          <div className="brand">
+            <div className="brandLogo" title="DENR">
+              <Image src="/images/denr.png" alt="DENR Logo" width={24} height={24} style={{ objectFit: "contain" }} />
+            </div>
+            <div className="brandTxt">
+              <div className="brandTitle">One Control Map</div>
+              <div className="brandSub">PENRO Cagayan</div>
+            </div>
+          </div>
+
+        </div>
+
+        <div className="header">
+          <h1 className="formTitle">Login</h1>
+          <div className="formSub">Enter your credentials to continue.</div>
+        </div>
+
+        <form onSubmit={onSubmit}>
+          <div className="field">
+            <label htmlFor="email">Email</label>
+            <div className="inputWrap">
+              <input
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@denr.gov.ph"
+                autoComplete="username"
+              />
+            </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor="password">Password</label>
+            <div className="inputWrap">
+              <input
+                id="password"
+                type={showPw ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                autoComplete="current-password"
+              />
+              <button
+                className="iconMiniBtn"
+                type="button"
+                onClick={() => setShowPw((v) => !v)}
+                aria-label={showPw ? "Hide password" : "Show password"}
+                title={showPw ? "Hide password" : "Show password"}
+              >
+                <EyeIcon open={showPw} />
+              </button>
+            </div>
+          </div>
+
+          <div className="row2">
+            <label className="check">
+              <input checked={remember} onChange={(e) => setRemember(e.target.checked)} type="checkbox" />
+              Remember me
+            </label>
+
+            <button className="btn btnPrimary" type="button" onClick={goGuest}>
+              View Map
+            </button>
+          </div>
+
+          <button className="btn btnPrimary btnWide" disabled={!canSubmit || busy} type="submit">
+            {busy ? "Signing in…" : <strong>Sign in</strong>}
+          </button>
+
+          <div className="help">
+            <span>Need access? Contact your administrator.</span>
+            <span>© DENR</span>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
