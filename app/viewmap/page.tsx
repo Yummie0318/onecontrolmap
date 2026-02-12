@@ -1,10 +1,9 @@
 // C:\Users\Yummie03\Desktop\onemap\app\viewmap\page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import ResultMap from "@/app/components/ResultMapClient";
 import Image from "next/image";
-import { faUserCircle, faUserShield, faGear } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faLayerGroup,
@@ -20,6 +19,7 @@ import {
   faChevronDown,
   faPalette,
   faEraser,
+  faUserShield,
 } from "@fortawesome/free-solid-svg-icons";
 
 type LayerRow = {
@@ -41,12 +41,13 @@ type MapLayer = {
   geojson: any | null;
   loading: boolean;
   error?: string;
+  _geoMode?: "map" | "full";
 };
 
 /** default color (when no per-feature override) */
-const DEFAULT_LAYER_COLOR = "#0b1220";
+const DEFAULT_LAYER_COLOR = "#2563eb";
 /** default color used by the table color picker */
-const DEFAULT_TABLE_COLOR = "#d92d20"; // denr-ish red default
+const DEFAULT_TABLE_COLOR = "#2563eb";
 
 function safeJsonParse(text: string) {
   try {
@@ -77,7 +78,6 @@ function extractAttributesWithIds(fc: any): {
   rows: { __idx: number; __fid: string | number | null; [k: string]: any }[];
 } {
   const features = Array.isArray(fc?.features) ? fc.features : [];
-
   const rows = features.map((f: any, idx: number) => {
     const props = f && typeof f === "object" ? f.properties ?? {} : {};
     const fid = (f && typeof f === "object" ? f.id ?? props?.__fid ?? null : null) as any;
@@ -107,24 +107,20 @@ function stringifyCell(v: any) {
   }
 }
 
-/** keep selected indices valid after reload */
 function clampSelected(selected: Set<number>, maxExclusive: number) {
   const out = new Set<number>();
   for (const i of selected) if (Number.isFinite(i) && i >= 0 && i < maxExclusive) out.add(i);
   return out;
 }
 
-/** Loader ring */
 function Ring({ size = 16 }: { size?: number }) {
   return <span className="ring" style={{ width: size, height: size }} aria-hidden="true" />;
 }
 
-/** Subtle shimmer block */
 function Shimmer({ h = 14, w = "100%" }: { h?: number; w?: string }) {
   return <span className="shimmer" style={{ height: h, width: w }} aria-hidden="true" />;
 }
 
-/** small stable hash -> forces map redraw even if color-count doesn't change */
 function hashString(s: string) {
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = (h * 33) ^ s.charCodeAt(i);
@@ -133,31 +129,46 @@ function hashString(s: string) {
 
 export default function ViewMapPage() {
   const [layers, setLayers] = useState<MapLayer[]>([]);
+  const layersRef = useRef<MapLayer[]>([]);
+  useEffect(() => {
+    layersRef.current = layers;
+  }, [layers]);
+
+  // ✅ keeps the “checkbox click order” (first clicked = bottom, last clicked = top)
+  const [layerDrawOrder, setLayerDrawOrder] = useState<string[]>([]);
   const [loadingList, setLoadingList] = useState(false);
   const [booting, setBooting] = useState(true);
 
   const [search, setSearch] = useState("");
+  const isFiltering = search.trim().length > 0;
+
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
+  // basemap toggle (true = show tiles, false = plain white)
+const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
+
 
   // attribute table viewer state
   const [tableOpen, setTableOpen] = useState(false);
   const [tableLayerId, setTableLayerId] = useState<string | null>(null);
   const [tableSearch, setTableSearch] = useState("");
 
+    // attribute table pagination
+    const [tablePage, setTablePage] = useState(1); // 1-based
+    const [tablePageSize, setTablePageSize] = useState(50); // tweak: 50/100/200/500
+
+    
   // selection per layer (indices) -> controls FILTERING (what is shown on map)
   const [selectedFeatureIdxByLayer, setSelectedFeatureIdxByLayer] = useState<Record<string, Set<number>>>({});
 
   // per-layer per-feature color overrides
-  // key: layerId -> { [__idx]: "#rrggbb" }
   const [featureColorByLayer, setFeatureColorByLayer] = useState<Record<string, Record<number, string>>>({});
 
   // attribute-table color picker (bulk applies)
   const [tableColor, setTableColor] = useState(DEFAULT_TABLE_COLOR);
 
   const abortersRef = useRef<Record<string, AbortController>>({});
-  const isFiltering = search.trim().length > 0;
 
-  async function refreshList() {
+  const refreshList = useCallback(async () => {
     setLoadingList(true);
     try {
       const r = await fetch("/api/layers", { cache: "no-store" });
@@ -166,6 +177,13 @@ export default function ViewMapPage() {
       if (!j.ok) throw new Error(j.error || "Failed to load layers");
 
       const rows: LayerRow[] = j.layers || [];
+
+      // ✅ keep draw order but remove ids that no longer exist
+      setLayerDrawOrder((prev) => {
+        const valid = new Set(rows.map((r) => r.id));
+        return prev.filter((id) => valid.has(id));
+      });
+
       setLayers((prev) => {
         const prevById = new Map(prev.map((p) => [p.id, p]));
         return rows.map((row) => {
@@ -179,6 +197,7 @@ export default function ViewMapPage() {
             geojson: old?.geojson ?? null,
             loading: old?.loading ?? false,
             error: old?.error,
+            _geoMode: old?._geoMode,
           };
         });
       });
@@ -186,9 +205,9 @@ export default function ViewMapPage() {
       setLoadingList(false);
       setBooting(false);
     }
-  }
+  }, []);
 
-  async function loadGeojson(layerId: string) {
+  const loadGeojson = useCallback(async (layerId: string, mode: "map" | "full" = "map") => {
     abortersRef.current[layerId]?.abort();
     const ac = new AbortController();
     abortersRef.current[layerId] = ac;
@@ -196,7 +215,11 @@ export default function ViewMapPage() {
     setLayers((prev) => prev.map((l) => (l.id === layerId ? { ...l, loading: true, error: undefined } : l)));
 
     try {
-      const r = await fetch(`/api/layers/${layerId}/geojson`, { cache: "no-store", signal: ac.signal });
+      const r = await fetch(`/api/layers/${layerId}/geojson?mode=${mode}`, {
+        cache: "no-store",
+        signal: ac.signal,
+      });
+
       const text = await r.text();
       const j: any = safeJsonParse(text);
       if (j?.ok === false) throw new Error(j.error || "Failed to load GeoJSON");
@@ -204,7 +227,18 @@ export default function ViewMapPage() {
       const fc = coerceFeatureCollection(j);
       if (!fc) throw new Error("API did not return a GeoJSON FeatureCollection.");
 
-      setLayers((prev) => prev.map((l) => (l.id === layerId ? { ...l, geojson: fc, loading: false } : l)));
+      setLayers((prev) =>
+        prev.map((l) =>
+          l.id === layerId
+            ? {
+                ...l,
+                geojson: fc,
+                loading: false,
+                _geoMode: mode,
+              }
+            : l
+        )
+      );
 
       // keep selection valid after reload
       setSelectedFeatureIdxByLayer((prev) => {
@@ -230,152 +264,210 @@ export default function ViewMapPage() {
         prev.map((l) => (l.id === layerId ? { ...l, loading: false, error: e?.message ?? "Failed to load" } : l))
       );
     }
-  }
+  }, []);
 
-  async function toggleLayer(layerId: string, nextVisible: boolean) {
-    setLayers((prev) => prev.map((l) => (l.id === layerId ? { ...l, visible: nextVisible } : l)));
-    if (nextVisible) {
-      const cur = layers.find((l) => l.id === layerId);
-      if (!cur?.geojson && !cur?.loading) await loadGeojson(layerId);
-    }
-  }
+  const toggleLayer = useCallback(
+    async (layerId: string, nextVisible: boolean) => {
+      // 1) update visible state
+      setLayers((prev) => prev.map((l) => (l.id === layerId ? { ...l, visible: nextVisible } : l)));
 
-  function selectFiltered(next: boolean, filteredIds: string[]) {
-    const ids = new Set(filteredIds);
-    setLayers((prev) => prev.map((l) => (ids.has(l.id) ? { ...l, visible: next } : l)));
+      // 2) update draw order (first clicked = bottom; newest visible = top)
+      setLayerDrawOrder((prev) => {
+        if (nextVisible) {
+          const without = prev.filter((id) => id !== layerId);
+          return [...without, layerId];
+        }
+        return prev.filter((id) => id !== layerId);
+      });
 
-    if (next) {
-      const missing = layers.filter((l) => ids.has(l.id) && !l.geojson && !l.loading).slice(0, 10);
-      missing.forEach((m) => loadGeojson(m.id));
-    }
-  }
+      // 3) lazy-load / upgrade geojson if needed (use latest layers via ref)
+      if (nextVisible) {
+        const cur = layersRef.current.find((l) => l.id === layerId);
+        if (!cur) return;
 
-  function clearAll() {
+        // ✅ for visibility, prefer FULL so table is always ready
+        if (!cur.geojson && !cur.loading) {
+          await loadGeojson(layerId, "full");
+          return;
+        }
+        if (cur.geojson && cur._geoMode !== "full" && !cur.loading) {
+          await loadGeojson(layerId, "full");
+        }
+      }
+    },
+    [loadGeojson]
+  );
+
+  const selectFiltered = useCallback(
+    (next: boolean, filteredIds: string[]) => {
+      const ids = new Set(filteredIds);
+      setLayers((prev) => prev.map((l) => (ids.has(l.id) ? { ...l, visible: next } : l)));
+
+      // ✅ if turning on, load FULL (so table works immediately)
+      if (next) {
+        const snapshot = layersRef.current;
+        const missing = snapshot.filter((l) => ids.has(l.id) && (!l.geojson || l._geoMode !== "full") && !l.loading).slice(0, 10);
+        missing.forEach((m) => loadGeojson(m.id, "full"));
+      } else {
+        // if turning off, remove from draw order
+        setLayerDrawOrder((prev) => prev.filter((id) => !ids.has(id)));
+      }
+    },
+    [loadGeojson]
+  );
+
+  const clearAll = useCallback(() => {
     setLayers((prev) => prev.map((l) => ({ ...l, visible: false })));
-  }
+    setLayerDrawOrder([]);
+  }, []);
 
-  function openAttributeTable(layerId: string) {
-    setTableLayerId(layerId);
-    setTableOpen(true);
-    setTableColor(DEFAULT_TABLE_COLOR);
-    setTableSearch("");
+    // reset pagination when layer/search changes or when table opens
+    useEffect(() => {
+      if (!tableOpen) return;
+      setTablePage(1);
+    }, [tableOpen, tableLayerId, tableSearch]);
+  
+  const openAttributeTable = useCallback(
+    (layerId: string) => {
+      setTableLayerId(layerId);
+      setTableOpen(true);
+      setTableColor(DEFAULT_TABLE_COLOR);
+      setTableSearch("");
 
-    const cur = layers.find((l) => l.id === layerId);
-    if (cur && !cur.geojson && !cur.loading) loadGeojson(layerId);
-  }
+      const cur = layersRef.current.find((l) => l.id === layerId);
+      if (cur && (!cur.geojson || cur._geoMode !== "full") && !cur.loading) loadGeojson(layerId, "full");
+    },
+    [loadGeojson]
+  );
 
-  // selection = FILTERING on map
-  function toggleFeatureSelection(layerId: string, idx: number, next: boolean) {
+  const toggleFeatureSelection = useCallback((layerId: string, idx: number, next: boolean) => {
     setSelectedFeatureIdxByLayer((prev) => {
       const cur = new Set(prev[layerId] ?? []);
       if (next) cur.add(idx);
       else cur.delete(idx);
       return { ...prev, [layerId]: cur };
     });
-  }
+  }, []);
 
-  function clearSelectedFeaturesInLayer(layerId: string) {
+  const clearSelectedFeaturesInLayer = useCallback((layerId: string) => {
     setSelectedFeatureIdxByLayer((prev) => ({ ...prev, [layerId]: new Set<number>() }));
-  }
+  }, []);
 
-  // apply color to rows (bulk) -> IMPORTANT: only affects passed idxs (so older red stays red)
-  function colorRows(layerId: string, idxs: number[], color: string) {
-    if (!layerId) return;
-    if (!idxs.length) return;
+  const colorRows = useCallback((layerId: string, idxs: number[], color: string) => {
+    if (!layerId || !idxs.length) return;
     setFeatureColorByLayer((prev) => {
       const cur = { ...(prev[layerId] ?? {}) };
       for (const idx of idxs) cur[idx] = color;
       return { ...prev, [layerId]: cur };
     });
-  }
+  }, []);
 
-  // clear per-feature color for rows
-  function clearColorForRows(layerId: string, idxs: number[]) {
-    if (!layerId) return;
-    if (!idxs.length) return;
+  const clearColorForRows = useCallback((layerId: string, idxs: number[]) => {
+    if (!layerId || !idxs.length) return;
     setFeatureColorByLayer((prev) => {
       const cur = { ...(prev[layerId] ?? {}) };
       for (const idx of idxs) delete cur[idx];
       return { ...prev, [layerId]: cur };
     });
-  }
+  }, []);
 
-  // per-row set/clear
-  function colorRow(layerId: string, idx: number, color: string) {
+  const colorRow = useCallback((layerId: string, idx: number, color: string) => {
     setFeatureColorByLayer((prev) => {
       const cur = { ...(prev[layerId] ?? {}) };
       cur[idx] = color;
       return { ...prev, [layerId]: cur };
     });
-  }
-  function clearRowColor(layerId: string, idx: number) {
+  }, []);
+
+  const clearRowColor = useCallback((layerId: string, idx: number) => {
     setFeatureColorByLayer((prev) => {
       const cur = { ...(prev[layerId] ?? {}) };
       delete cur[idx];
       return { ...prev, [layerId]: cur };
     });
-  }
+  }, []);
 
-  // clear all color overrides for the layer
-  function clearAllColorsForLayer(layerId: string) {
+  const clearAllColorsForLayer = useCallback((layerId: string) => {
     setFeatureColorByLayer((prev) => ({ ...prev, [layerId]: {} }));
-  }
+  }, []);
 
   useEffect(() => {
     refreshList();
     return () => Object.values(abortersRef.current).forEach((a) => a.abort());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshList]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return layers;
-    return layers.filter((l) => `${l.name} ${l.geom_type ?? ""} ${l.srid ?? ""}`.toLowerCase().includes(q));
+  
+    const base = !q
+      ? layers
+      : layers.filter((l) =>
+          `${l.name} ${l.geom_type ?? ""} ${l.srid ?? ""}`
+            .toLowerCase()
+            .includes(q)
+        );
+  
+    // ✅ Alphabetical sort by layer name
+    return [...base].sort((a, b) => {
+      if (a.visible !== b.visible) return a.visible ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
   }, [layers, search]);
+  
 
   const filteredIds = useMemo(() => filtered.map((l) => l.id), [filtered]);
 
-  /**
-   * Visible layers:
-   * - If NO selection for that layer => show ALL features
-   * - If there is selection => show ONLY selected features
-   * - Inject per-feature color override into properties.__color
-   */
   const visibleLayers = useMemo(() => {
-    const base = layers.filter((l) => l.visible && l.geojson);
+    const byId = new Map(layers.map((l) => [l.id, l] as const));
 
-    return base.map((l) => {
+    const ordered: MapLayer[] = [];
+    for (const id of layerDrawOrder) {
+      const l = byId.get(id);
+      if (l?.visible && l.geojson) ordered.push(l);
+    }
+    for (const l of layers) {
+      if (l.visible && l.geojson && !layerDrawOrder.includes(l.id)) ordered.push(l);
+    }
+
+    return ordered.map((l) => {
       const fc = l.geojson;
       const features = Array.isArray(fc?.features) ? fc.features : [];
       const selected = selectedFeatureIdxByLayer[l.id] ?? new Set<number>();
       const colorOverrides = featureColorByLayer[l.id] ?? {};
 
+      const needsFilter = selected.size > 0;
+      const hasOverrides = Object.keys(colorOverrides).length > 0;
+
+      if (!needsFilter && !hasOverrides) return l;
+
       const nextFeatures: any[] = [];
       for (let idx = 0; idx < features.length; idx++) {
-        if (selected.size > 0 && !selected.has(idx)) continue;
+        if (needsFilter && !selected.has(idx)) continue;
 
         const f = features[idx];
         const c = colorOverrides[idx];
-
-        if (c) {
-          nextFeatures.push({ ...f, properties: { ...(f?.properties ?? {}), __color: c } });
-        } else {
-          // ensure no stale __color stuck
-          if (f?.properties && "__color" in f.properties) {
-            const { __color, ...rest } = f.properties;
-            nextFeatures.push({ ...f, properties: rest });
-          } else {
-            nextFeatures.push(f);
-          }
-        }
+        if (c) nextFeatures.push({ ...f, properties: { ...(f?.properties ?? {}), __color: c } });
+        else nextFeatures.push(f);
       }
 
       return { ...l, geojson: { ...fc, features: nextFeatures } };
     });
-  }, [layers, selectedFeatureIdxByLayer, featureColorByLayer]);
+  }, [layers, layerDrawOrder, selectedFeatureIdxByLayer, featureColorByLayer]);
 
-  const visibleCount = layers.filter((l) => l.visible).length;
-  const loadedCount = layers.filter((l) => l.visible && l.geojson).length;
+  const visibleCount = useMemo(() => layers.filter((l) => l.visible).length, [layers]);
+  const loadedCount = useMemo(() => layers.filter((l) => l.visible && l.geojson).length, [layers]);
+
+  const layerOrderNumberById = useMemo(() => {
+    const byId = new Map(layers.map((l) => [l.id, l] as const));
+    const visibleOrderedIds: string[] = [];
+
+    for (const id of layerDrawOrder) if (byId.get(id)?.visible) visibleOrderedIds.push(id);
+    for (const l of layers) if (l.visible && !visibleOrderedIds.includes(l.id)) visibleOrderedIds.push(l.id);
+
+    const m: Record<string, number> = {};
+    visibleOrderedIds.forEach((id, i) => (m[id] = i + 1));
+    return m;
+  }, [layers, layerDrawOrder]);
 
   const hasAnyVisibleFiltered = useMemo(() => filtered.some((l) => l.visible), [filtered]);
   const hasAllVisibleFiltered = useMemo(() => filtered.length > 0 && filtered.every((l) => l.visible), [filtered]);
@@ -383,9 +475,10 @@ export default function ViewMapPage() {
   const tableLayer = useMemo(() => layers.find((l) => l.id === tableLayerId) ?? null, [layers, tableLayerId]);
 
   const tableData = useMemo(() => {
+    if (!tableOpen) return { columns: [] as string[], rows: [] as any[] };
     if (!tableLayer?.geojson) return { columns: [] as string[], rows: [] as any[] };
     return extractAttributesWithIds(tableLayer.geojson);
-  }, [tableLayer?.geojson]);
+  }, [tableOpen, tableLayer?.geojson]);
 
   const tableSelectedSet = useMemo(() => {
     if (!tableLayerId) return new Set<number>();
@@ -404,6 +497,23 @@ export default function ViewMapPage() {
       return Object.values(r).some((v) => stringifyCell(v).toLowerCase().includes(q));
     });
   }, [tableData.rows, tableSearch]);
+
+  const tableFilteredCount = tableFilteredRows.length;
+
+  const tablePageCount = useMemo(() => {
+    return Math.max(1, Math.ceil(tableFilteredCount / Math.max(1, tablePageSize)));
+  }, [tableFilteredCount, tablePageSize]);
+
+  const tablePageSafe = useMemo(() => {
+    return Math.min(Math.max(1, tablePage), tablePageCount);
+  }, [tablePage, tablePageCount]);
+
+  const tablePagedRows = useMemo(() => {
+    const start = (tablePageSafe - 1) * tablePageSize;
+    const end = start + tablePageSize;
+    return tableFilteredRows.slice(start, end);
+  }, [tableFilteredRows, tablePageSafe, tablePageSize]);
+
 
   const tableMax = tableData.rows.length;
 
@@ -434,8 +544,6 @@ export default function ViewMapPage() {
     return false;
   }, [tableLayerId, tableFilteredIdxs, tableSelectedSet]);
 
-  // ✅ IMPORTANT: apply color only to CURRENT FILTER GROUP (if tableSearch has text),
-  // otherwise apply to all selected.
   const idxsToColorNow = useMemo(() => {
     if (!tableLayerId) return [] as number[];
     const q = tableSearch.trim();
@@ -450,7 +558,6 @@ export default function ViewMapPage() {
     return tableFilteredIdxs.filter((i) => tableSelectedSet.has(i));
   }, [tableLayerId, tableSearch, tableFilteredIdxs, tableSelectedSet]);
 
-  // ✅ FORCE map redraw on real color changes (not just count)
   const mapKey = useMemo(() => {
     const selSig = Object.entries(selectedFeatureIdxByLayer)
       .map(([id, s]) => `${id}:${Array.from(s).sort((a, b) => a - b).join(",")}`)
@@ -469,8 +576,8 @@ export default function ViewMapPage() {
     return `${visibleLayers.length}-${hashString(selSig)}-${hashString(clrSig)}`;
   }, [visibleLayers.length, selectedFeatureIdxByLayer, featureColorByLayer]);
 
-  const loadingAny = layers.some((l) => l.loading);
-  const loadingCount = layers.filter((l) => l.loading).length;
+  const loadingAny = useMemo(() => layers.some((l) => l.loading), [layers]);
+  const loadingCount = useMemo(() => layers.filter((l) => l.loading).length, [layers]);
   const showHUD = loadingCount >= 2;
 
   const colorCountForTableLayer = useMemo(() => Object.keys(tableColorOverrides).length, [tableColorOverrides]);
@@ -481,12 +588,10 @@ export default function ViewMapPage() {
     pickAllRef.current.indeterminate = !allFilteredSelected && someFilteredSelected;
   }, [allFilteredSelected, someFilteredSelected]);
 
-  // ✅ map action buttons moved to Map header (per your screenshot)
-  const canReloadVisible = useMemo(() => layers.some((l) => l.visible), [layers]);
-  const reloadVisibleLayers = async () => {
-    const ids = layers.filter((l) => l.visible).map((l) => l.id);
-    for (const id of ids) await loadGeojson(id);
-  };
+  const reloadVisibleLayers = useCallback(async () => {
+    const ids = layersRef.current.filter((l) => l.visible).map((l) => l.id);
+    for (const id of ids) await loadGeojson(id, "map");
+  }, [loadGeojson]);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const profileWrapRef = useRef<HTMLDivElement | null>(null);
@@ -499,7 +604,6 @@ export default function ViewMapPage() {
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
-
 
   return (
     <div className="shell">
@@ -535,12 +639,12 @@ export default function ViewMapPage() {
 
         html, body { height:100%; margin:0; }
 
-      html, body{
-        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
-          "Apple Color Emoji","Segoe UI Emoji";
-        -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
-      }
+        html, body{
+          font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+            "Apple Color Emoji","Segoe UI Emoji";
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+        }
 
         body{
           color: var(--text);
@@ -556,13 +660,12 @@ export default function ViewMapPage() {
 
         .shell{ height:100vh; width:100%; display:flex; flex-direction:column; }
 
-        /* loaders */
         .ring{
           display:inline-block;
           border-radius: 999px;
           border: 2px solid rgba(11,18,32,.16);
-          border-top-color: rgba(15,122,58,.95);
-          box-shadow: 0 0 0 6px rgba(15,122,58,.10);
+          border-top-color: var(--blue);
+          box-shadow: 0 0 0 6px var(--blueBg);
           animation: spin .75s linear infinite;
         }
         @keyframes spin{ to{ transform: rotate(360deg); } }
@@ -614,22 +717,20 @@ export default function ViewMapPage() {
         .bootLine{ display:flex; gap:10px; align-items:center; }
         .bootTitle{ font-weight: 1000; letter-spacing: -.35px; white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
 
-        /* top bar */
         .topBar{
-  height: 58px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--stroke);
-  background: rgba(255,255,255,.88);
-  backdrop-filter: blur(14px);
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:10px;
-
-  position: relative;     /* ✅ creates stacking context */
-  z-index: 70000;         /* ✅ above Leaflet controls */
-  overflow: visible;      /* ✅ allow profile dropdown */
-}
+          height: 58px;
+          padding: 0 12px;
+          border-bottom: 1px solid var(--stroke);
+          background: rgba(255,255,255,.88);
+          backdrop-filter: blur(14px);
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:10px;
+          position: relative;
+          z-index: 70000;
+          overflow: visible;
+        }
         .brand{ display:flex; align-items:center; gap:10px; min-width:0; }
         .appIcon{
           width: 36px; height: 36px;
@@ -643,12 +744,12 @@ export default function ViewMapPage() {
           display:flex; align-items:center; justify-content:center;
         }
         .titleWrap{ display:flex; flex-direction:column; gap:1px; min-width:0; }
-        .title{ font-size: 13px; font-weight: 1000; letter-spacing: -.25px; line-height: 1.1; white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
+        .title{ font-size: 16px; font-weight: 1000; letter-spacing: -.25px; line-height: 1.1; white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
         .subtitle{ font-size: 11px; font-weight: 900; color: var(--muted); white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
 
         .pill{
           font-size: 11px;
-          font-weight: 600;                 /* ✅ not bold */
+          font-weight: 600;
           color: rgba(11,18,32,.74);
           border: 1px solid var(--stroke);
           padding: 6px 10px;
@@ -660,24 +761,21 @@ export default function ViewMapPage() {
           white-space:nowrap;
         }
 
-
-        /* buttons */
-     .btn{
-  border: 1px solid var(--stroke);
-  background: rgba(255,255,255,.92);
-  color: var(--text);
-  font-weight: 650;                 /* ✅ not bold */
-  cursor: pointer;
-  display:inline-flex;
-  align-items:center;
-  gap:8px;
-  user-select:none;
-  transition: transform .10s ease, border-color .15s ease, box-shadow .15s ease, background .15s ease;
-  padding: 8px 10px;
-  border-radius: 14px;
-  font-size: 11px;                  /* ✅ smaller */
-}
-
+        .btn{
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.92);
+          color: var(--text);
+          font-weight: 650;
+          cursor: pointer;
+          display:inline-flex;
+          align-items:center;
+          gap:8px;
+          user-select:none;
+          transition: transform .10s ease, border-color .15s ease, box-shadow .15s ease, background .15s ease;
+          padding: 8px 10px;
+          border-radius: 14px;
+          font-size: 11px;
+        }
         .btn:hover{
           border-color: var(--stroke2);
           box-shadow: 0 12px 28px rgba(11,18,32,.10);
@@ -710,10 +808,9 @@ export default function ViewMapPage() {
           height: 34px;
           padding: 0;
           justify-content:center;
-          border-radius: 999px; /* ✅ round buttons in table */
+          border-radius: 999px;
         }
 
-        /* layout */
         .main{
           flex:1;
           min-height:0;
@@ -744,15 +841,14 @@ export default function ViewMapPage() {
 
         .headRow{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
         .headLeft{ display:flex; align-items:center; gap:10px; min-width:0; }
-     .sectionTitle{
-        font-size: 15px;                  /* ✅ smaller */
-        font-weight: 700;                 /* ✅ softer */
-        letter-spacing: -0.15px;
-        display:flex;
-        align-items:center;
-        gap:10px;
-      }
-
+        .sectionTitle{
+          font-size: 15px;
+          font-weight: 700;
+          letter-spacing: -0.15px;
+          display:flex;
+          align-items:center;
+          gap:10px;
+        }
 
         .searchWrap{
           display:flex;
@@ -767,15 +863,15 @@ export default function ViewMapPage() {
           border-color: rgba(15,122,58,.35);
           box-shadow: 0 0 0 5px rgba(15,122,58,.10);
         }
-  .searchInput{
-  width:100%;
-  border:0;
-  outline:0;
-  background:transparent;
-  font-weight: 600;                 /* ✅ softer */
-  color: var(--text);
-  font-size: 12px;                  /* ✅ smaller */
-}
+        .searchInput{
+          width:100%;
+          border:0;
+          outline:0;
+          background:transparent;
+          font-weight: 600;
+          color: var(--text);
+          font-size: 12px;
+        }
 
         .list{
           overflow:auto;
@@ -804,23 +900,21 @@ export default function ViewMapPage() {
 
         .cardTop{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
         .name{
-  font-weight: 650;                 /* ✅ not bold */
-  letter-spacing: -0.10px;
-  font-size: 12px;                  /* ✅ smaller */
-  line-height: 1.2;
-  word-break: break-word;
-}
-
-      .meta{
-  font-size: 10.5px;                /* ✅ smaller */
-  font-weight: 500;                 /* ✅ not bold */
-  color: rgba(11,18,32,.62);
-  margin-top: 4px;
-}
+          font-weight: 650;
+          letter-spacing: -0.10px;
+          font-size: 12px;
+          line-height: 1.2;
+          word-break: break-word;
+        }
+        .meta{
+          font-size: 10.5px;
+          font-weight: 500;
+          color: rgba(11,18,32,.62);
+          margin-top: 4px;
+        }
 
         .row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
         .leftRow{ display:flex; align-items:center; gap:10px; min-width:0; }
-
         .layerChk{ width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary); }
 
         .statusDot{
@@ -860,24 +954,22 @@ export default function ViewMapPage() {
           gap:10px;
           font-size: 15px;
         }
-   .chip{
-  font-size: 10.5px;                /* ✅ smaller */
-  font-weight: 650;                 /* ✅ softer */
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--stroke);
-  background: rgba(255,255,255,.92);
-  color: rgba(11,18,32,.78);
-  display:inline-flex;
-  align-items:center;
-  gap:8px;
-}
-
+        .chip{
+          font-size: 10.5px;
+          font-weight: 650;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.92);
+          color: rgba(11,18,32,.78);
+          display:inline-flex;
+          align-items:center;
+          gap:8px;
+        }
 
         .mapArea{ position:relative; flex:1; min-height:0; }
         .mapInner{ position:absolute; inset:0; border-radius: 18px; overflow:hidden; }
 
-        /* mobile */
         @media (max-width: 980px){
           body{ overflow:hidden; }
           .main{ grid-template-columns: 1fr; padding: 0; gap: 0; }
@@ -887,7 +979,6 @@ export default function ViewMapPage() {
           .mapInner{ border-radius: 0; }
         }
 
-        /* FAB */
         .fab{
           position: fixed;
           right: 14px;
@@ -935,7 +1026,6 @@ export default function ViewMapPage() {
         }
         @media (max-width: 980px){ .fab{ display:flex; } }
 
-        /* Bottom sheet */
         .sheetOverlay{
           position: fixed; inset: 0;
           background: rgba(11,18,32,.42);
@@ -978,19 +1068,16 @@ export default function ViewMapPage() {
         }
         .sheetTitle{ font-weight: 1000; display:flex; align-items:center; gap:10px; }
 
-        /* Attribute modal */
-      .modalOverlay{
-        position: fixed;
-        inset: 0;
-        background: rgba(11,18,32,.50);
-
-        z-index: 90000;          /* ✅ ABOVE topBar (70000) */
-        display:flex;
-        align-items:flex-end;
-        justify-content:center;
-        padding: 10px;
-      }
-
+        .modalOverlay{
+          position: fixed;
+          inset: 0;
+          background: rgba(11,18,32,.50);
+          z-index: 90000;
+          display:flex;
+          align-items:flex-end;
+          justify-content:center;
+          padding: 10px;
+        }
         .modal{
           width: min(1180px, 100%);
           height: min(86vh, 920px);
@@ -1005,7 +1092,6 @@ export default function ViewMapPage() {
           opacity: 0;
           animation: sheetIn .18s ease-out forwards;
         }
-
         @media (min-width: 900px){ .modalOverlay{ align-items:center; } }
 
         .modalTop{
@@ -1018,7 +1104,8 @@ export default function ViewMapPage() {
           flex-wrap:wrap;
           background: rgba(255,255,255,.96);
         }
-        .rowTools{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+        .rowTools{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; width:100%; }
+
         .emptyState{
           padding: 18px 12px;
           color: rgba(11,18,32,.65);
@@ -1030,7 +1117,6 @@ export default function ViewMapPage() {
           min-height: 140px;
         }
 
-        /* Table bar */
         .tableBar{
           padding: 10px 12px;
           border-bottom: 1px solid var(--stroke);
@@ -1058,7 +1144,6 @@ export default function ViewMapPage() {
           white-space:nowrap;
         }
 
-        /* ✅ circular color button */
         .colorPickWrap{ display:inline-flex; align-items:center; gap:8px; }
         .colorCircle{
           width: 34px;
@@ -1091,13 +1176,13 @@ export default function ViewMapPage() {
           pointer-events:none;
         }
 
-      .tableWrap{
-        flex: 1;                 /* ✅ fills remaining modal space */
-        min-height: 0;           /* ✅ prevents pushing under header */
-        overflow: auto;
-        -webkit-overflow-scrolling: touch;
-        background: rgba(11,18,32,.03);
-      }
+        .tableWrap{
+          flex: 1;
+          min-height: 0;
+          overflow: auto;
+          -webkit-overflow-scrolling: touch;
+          background: rgba(11,18,32,.03);
+        }
 
         table{
           border-collapse: separate;
@@ -1113,18 +1198,17 @@ export default function ViewMapPage() {
           white-space: nowrap;
         }
         th{
-         position: sticky;
-          top: 0;                  /* stays inside tableWrap */
-          z-index: 3;  
+          position: sticky;
+          top: 0;
+          z-index: 3;
           background: rgba(255,255,255,.98);
           border-bottom: 1px solid rgba(11,18,32,.12);
-          font-weight: 700;            /* ✅ header bold only */
+          font-weight: 700;
           color: rgba(11,18,32,.92);
         }
-        td{ font-weight: 450;  color: rgba(11,18,32,.82); } /* ✅ body not too bold */
+        td{ font-weight: 450;  color: rgba(11,18,32,.82); }
         tbody tr:hover td{ background: rgba(15,122,58,.06); }
 
-        /* ✅ selected row highlight */
         tbody tr.rowSelected td{
           background: rgba(15,122,58,.10) !important;
           border-bottom-color: rgba(15,122,58,.18);
@@ -1135,7 +1219,6 @@ export default function ViewMapPage() {
 
         .rowChk{ width:16px; height:16px; cursor:pointer; accent-color: var(--primary); }
 
-        /* HUD */
         .hud{
           position: fixed;
           top: 70px;
@@ -1164,114 +1247,90 @@ export default function ViewMapPage() {
           justify-content:center;
           color: rgba(11,18,32,.80);
         }
-          
-/* ───────────────────────── Profile (icon only) ───────────────────────── */
-.profileWrap{
-  position: relative;
-  z-index: 70000; /* ✅ ensure wrapper is above map stacking contexts */
-}
 
-/* ✅ always on top of Leaflet / map controls + NOT clipped */
-.profileMenu{
-  position: absolute;
-  top: calc(100% + 10px);
-  right: 0;
+        .profileWrap{ position: relative; z-index: 70000; }
+        .profileMenu{
+          position: absolute;
+          top: calc(100% + 10px);
+          right: 0;
+          width: 240px;
+          border-radius: 18px;
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.98);
+          box-shadow: var(--shadow2);
+          overflow: hidden;
+          z-index: 70010;
+          transform: translateY(6px);
+          opacity: 0;
+          animation: menuIn .14s ease-out forwards;
+          isolation: isolate;
+          will-change: transform, opacity;
+        }
+        @keyframes menuIn { to { transform: translateY(0); opacity: 1; } }
 
-  width: 240px;
-  border-radius: 18px;
-  border: 1px solid var(--stroke);
-  background: rgba(255,255,255,.98);
-  box-shadow: var(--shadow2);
-  overflow: hidden;
+        .profileMenu::before{
+          content:"";
+          position:absolute;
+          top:-7px;
+          right: 16px;
+          width: 12px;
+          height: 12px;
+          background: rgba(255,255,255,.98);
+          border-left: 1px solid var(--stroke);
+          border-top: 1px solid var(--stroke);
+          transform: rotate(45deg);
+        }
 
-  z-index: 70010;                 /* ✅ higher than map controls */
-  transform: translateY(6px);
-  opacity: 0;
-  animation: menuIn .14s ease-out forwards;
+        .profileHead{ padding: 12px; }
+        .profileName{
+          font-size: 14px;
+          font-weight: 750;
+          letter-spacing: -0.1px;
+        }
+        .profileSub{
+          font-size: 11px;
+          font-weight: 500;
+          color: var(--muted);
+          margin-top: 2px;
+        }
 
-  /* ✅ prevents weird stacking + keeps it from being clipped in some cases */
-  isolation: isolate;
-  will-change: transform, opacity;
-}
-@keyframes menuIn { to { transform: translateY(0); opacity: 1; } }
+        .profileDivider{ height:1px; background: rgba(11,18,32,.08); }
 
-.profileMenu::before{
-  content:"";
-  position:absolute;
-  top:-7px;
-  right: 16px;
-  width: 12px;
-  height: 12px;
-  background: rgba(255,255,255,.98);
-  border-left: 1px solid var(--stroke);
-  border-top: 1px solid var(--stroke);
-  transform: rotate(45deg);
-}
+        .profileItem{
+          width:100%;
+          display:flex;
+          align-items:center;
+          gap:10px;
+          padding: 11px 12px;
+          border:0;
+          background: transparent;
+          cursor:pointer;
+          font-size: 13px;
+          font-weight: 500;
+          color: var(--text);
+        }
+        .profileItem:hover{ background: rgba(15,122,58,.06); }
+        .profileItem svg{ opacity:.9; }
 
-/* ✅ softer typography (no super bold) */
-.profileHead{ padding: 12px; }
-.profileName{
-  font-size: 14px;
-  font-weight: 750;
-  letter-spacing: -0.1px;
-}
-.profileSub{
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--muted);
-  margin-top: 2px;
-}
+        .topRight{ display:flex; align-items:center; gap:10px; }
 
-.profileDivider{ height:1px; background: rgba(11,18,32,.08); }
-
-.profileItem{
-  width:100%;
-  display:flex;
-  align-items:center;
-  gap:10px;
-  padding: 11px 12px;
-
-  border:0;
-  background: transparent;
-  cursor:pointer;
-
-  font-size: 13px;
-  font-weight: 500;               /* ✅ softer */
-  color: var(--text);
-}
-.profileItem:hover{ background: rgba(15,122,58,.06); }
-.profileItem svg{ opacity:.9; }
-
-/* top right wrapper */
-.topRight{
-  display:flex;
-  align-items:center;
-  gap:10px;
-}
-
-/* ✅ avatar used inside the icon button */
-.avatar{
-  width: 34px;
-  height: 34px;
-  border-radius: 999px;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-
-  border: 1px solid rgba(11,18,32,.12);
-  background: rgba(15,122,58,.10);
-  color: var(--primary);
-
-  font-size: 13px;
-  font-weight: 700;               /* ✅ not too bold */
-  overflow:hidden;
-  line-height: 1;
-}
-
-
+        .avatar{
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          border: 1px solid rgba(11,18,32,.12);
+          background: rgba(15,122,58,.10);
+          color: var(--primary);
+          font-size: 13px;
+          font-weight: 700;
+          overflow:hidden;
+          line-height: 1;
+        }
       `}</style>
 
-      {/* Boot loader */}
       {booting ? (
         <div className="bootOverlay" role="status" aria-live="polite">
           <div className="bootCard">
@@ -1290,7 +1349,6 @@ export default function ViewMapPage() {
         </div>
       ) : null}
 
-      {/* HUD loader */}
       {showHUD ? (
         <div className="hud" role="status" aria-live="polite" title="Background loading">
           <Ring size={16} />
@@ -1298,72 +1356,55 @@ export default function ViewMapPage() {
         </div>
       ) : null}
 
-      {/* Top bar */}
       <div className="topBar">
         <div className="brand">
-        <div className="appIcon" aria-hidden="true">
-          <Image
-            src="/images/denr.png"
-            alt="DENR Logo"
-            width={28}
-            height={28}
-            style={{ objectFit: "contain" }}
-            priority
-          />
-        </div>
-
+          <div className="appIcon" aria-hidden="true">
+            <Image src="/images/denr.png" alt="DENR Logo" width={28} height={28} style={{ objectFit: "contain" }} priority />
+          </div>
           <div className="titleWrap">
             <div className="title">One Control Map</div>
             <div className="subtitle">PENRO Cagayan</div>
           </div>
         </div>
 
-      <div className="topRight">
+        <div className="topRight">
+          <div className="profileWrap" ref={profileWrapRef}>
+            <button
+              className="btn btnGhost iconBtn"
+              type="button"
+              onClick={() => setProfileOpen((v) => !v)}
+              aria-expanded={profileOpen}
+              aria-haspopup="menu"
+              title="Profile"
+              style={{ borderRadius: 999 }}
+            >
+              <span className="avatar" aria-hidden="true">
+                U
+              </span>
+            </button>
 
-  {/* Profile */}
-{/* Profile */}
-<div className="profileWrap" ref={profileWrapRef}>
-  <button
-    className="btn btnGhost iconBtn"
-    type="button"
-    onClick={() => setProfileOpen((v) => !v)}
-    aria-expanded={profileOpen}
-    aria-haspopup="menu"
-    title="Profile"
-    style={{ borderRadius: 999 }}
-  >
-    <span className="avatar" aria-hidden="true">U</span>
-  </button>
-
-  {profileOpen ? (
-    <div className="profileMenu" role="menu">
-      <div className="profileHead">
-        <div className="profileName">Guest User</div>
-        {/* <div className="profileSub">PENRO Cagayan</div> */}
-      </div>
-      <div className="profileDivider" />
-
-      <button
-        className="profileItem"
-        role="menuitem"
-        type="button"
-        onClick={() => {
-          setProfileOpen(false);
-          window.location.href = "/login";
-        }}
-      >
-        <FontAwesomeIcon icon={faUserShield} />
-        <span>Admin Login</span>
-      </button>
-    </div>
-  ) : null}
-</div>
-
-
-</div>
-
-
-
+            {profileOpen ? (
+              <div className="profileMenu" role="menu">
+                <div className="profileHead">
+                  <div className="profileName">Guest User</div>
+                </div>
+                <div className="profileDivider" />
+                <button
+                  className="profileItem"
+                  role="menuitem"
+                  type="button"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    window.location.href = "/login";
+                  }}
+                >
+                  <FontAwesomeIcon icon={faUserShield} />
+                  <span>Admin Login</span>
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
       </div>
 
       <div className="main">
@@ -1372,10 +1413,7 @@ export default function ViewMapPage() {
           <div className="panelHead">
             <div className="headRow">
               <div className="headLeft">
-                <div className="sectionTitle">
-                  <span className="dot" />
-                  Layers
-                </div>
+                <div className="sectionTitle">Layers</div>
                 <div className="pill">{filtered.length}</div>
               </div>
 
@@ -1395,8 +1433,8 @@ export default function ViewMapPage() {
                 <button
                   className="btn btnDanger"
                   onClick={() => (isFiltering ? selectFiltered(false, filteredIds) : clearAll())}
-                  disabled={isFiltering ? !hasAnyVisibleFiltered : layers.filter((l) => l.visible).length === 0}
-                  title="Clear visible"
+                  disabled={isFiltering ? !hasAnyVisibleFiltered : visibleCount === 0}
+                  title="Hide all"
                   type="button"
                 >
                   <FontAwesomeIcon icon={faEyeSlash} />
@@ -1406,12 +1444,7 @@ export default function ViewMapPage() {
 
             <div className="searchWrap">
               <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
-              <input
-                className="searchInput"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search layers…"
-              />
+              <input className="searchInput" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search layers…" />
               {isFiltering ? (
                 <button className="btn btnGhost iconBtn" onClick={() => setSearch("")} title="Clear" type="button">
                   <FontAwesomeIcon icon={faXmark} />
@@ -1454,13 +1487,23 @@ export default function ViewMapPage() {
               filtered.map((l) => {
                 const selectedCount = selectedFeatureIdxByLayer[l.id]?.size ?? 0;
                 const ready = l.visible && l.geojson;
+                const orderNo = layerOrderNumberById[l.id];
+
                 return (
                   <div key={l.id} className="card">
                     <div className="cardTop">
                       <div style={{ minWidth: 0 }}>
-                        <div className="name" title={l.name}>
-                          {l.name}
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div className="name" title={l.name} style={{ flex: 1, minWidth: 0 }}>
+                            {l.name}
+                          </div>
+                          {orderNo ? (
+                            <span className="pill" title="Draw order" style={{ padding: "4px 8px", fontSize: 10 }}>
+                              #{orderNo}
+                            </span>
+                          ) : null}
                         </div>
+
                         <div className="meta">
                           {l.geom_type ?? "-"} • SRID {l.srid ?? "-"}
                           {selectedCount > 0 ? ` • ${selectedCount}` : ""}
@@ -1482,21 +1525,10 @@ export default function ViewMapPage() {
                       </div>
 
                       <div style={{ display: "flex", gap: 8 }}>
-                        <button
-                          className="btn btnPrimary iconBtn"
-                          onClick={() => loadGeojson(l.id)}
-                          disabled={l.loading}
-                          title="Reload GeoJSON"
-                          type="button"
-                        >
+                        <button className="btn btnPrimary iconBtn" onClick={() => loadGeojson(l.id, "map")} disabled={l.loading} title="Reload GeoJSON" type="button">
                           {l.loading ? <Ring size={16} /> : <FontAwesomeIcon icon={faArrowsRotate} />}
                         </button>
-                        <button
-                          className="btn btnGhost iconBtn"
-                          onClick={() => openAttributeTable(l.id)}
-                          title="Attribute table"
-                          type="button"
-                        >
+                        <button className="btn btnGhost iconBtn" onClick={() => openAttributeTable(l.id)} title="Attribute table" type="button">
                           <FontAwesomeIcon icon={faTable} />
                         </button>
                       </div>
@@ -1523,42 +1555,49 @@ export default function ViewMapPage() {
                   <Ring size={14} />
                 </span>
               ) : null}
+              <span className="chip" title="Visible / loaded">
+                <b>{visibleCount}</b> • <b>{loadedCount}</b>
+              </span>
             </div>
 
-            {/* ✅ "reload/remove" moved here (as per screenshot) */}
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <div className="pill" title="Visible / loaded">
-              <b>{visibleCount}</b> • <b>{loadedCount}</b>
+            <button
+              className={showBasemap ? "btn btnPrimary" : "btn btnGhost"}
+              onClick={() => setShowBasemap((v) => !v)}
+              title={showBasemap ? "Basemap ON" : "Basemap OFF (faster)"}
+              type="button"
+            >
+              {showBasemap ? "Basemap: ON" : "Basemap: OFF"}
+            </button>
 
-              <button
-            className="btn btnPrimary"
-            onClick={refreshList}
-            disabled={loadingList}
-            title="Refresh layer list"
-            type="button"
-          >
-            {loadingList ? <Ring size={16} /> : <FontAwesomeIcon icon={faRotateRight} />}
-            <span style={{ display: "none" }}>Refresh</span>
-          </button>
-            </div>
+              <button className="btn btnPrimary iconBtn" onClick={refreshList} disabled={loadingList} title="Refresh layer list" type="button">
+                {loadingList ? <Ring size={16} /> : <FontAwesomeIcon icon={faRotateRight} />}
+              </button>
 
-
-            
+              {/* <button className="btn btnGhost iconBtn" onClick={reloadVisibleLayers} disabled={visibleCount === 0} title="Reload visible layers" type="button">
+                <FontAwesomeIcon icon={faArrowsRotate} />
+              </button> */}
             </div>
           </div>
 
           <div className="mapArea">
             <div className="mapInner">
-              <ResultMap
-                key={mapKey}
-                layers={visibleLayers.map((v) => ({
-                  id: v.id,
-                  name: v.name,
-                  color: DEFAULT_LAYER_COLOR,
-                  geom_type: v.geom_type,
-                  geojson: v.geojson,
-                }))}
-              />
+            <ResultMap
+              key={mapKey}
+              showBasemap={showBasemap}        // ✅ use state toggle
+              backgroundColor="#ffffff"
+              layers={visibleLayers.map((v) => ({
+                id: v.id,
+                name: v.name,
+                color: DEFAULT_LAYER_COLOR,
+                geom_type: v.geom_type,
+                geojson: v.geojson,
+              }))}
+            />
+
+
+
+
             </div>
           </div>
         </div>
@@ -1594,50 +1633,42 @@ export default function ViewMapPage() {
             </div>
 
             <div className="panelHead" style={{ borderRadius: 0 }}>
-  <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-    <div className="searchWrap" style={{ flex: 1 }}>
-      <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
-      <input
-        className="searchInput"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search layers…"
-      />
-      {isFiltering ? (
-        <button className="btn btnGhost iconBtn" onClick={() => setSearch("")} title="Clear" type="button">
-          <FontAwesomeIcon icon={faXmark} />
-        </button>
-      ) : null}
-    </div>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <div className="searchWrap" style={{ flex: 1 }}>
+                  <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
+                  <input className="searchInput" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search layers…" />
+                  {isFiltering ? (
+                    <button className="btn btnGhost iconBtn" onClick={() => setSearch("")} title="Clear" type="button">
+                      <FontAwesomeIcon icon={faXmark} />
+                    </button>
+                  ) : null}
+                </div>
 
-    {/* ✅ Eye button beside search */}
-    <button
-      className="btn btnDanger iconBtn"
-      onClick={() => (isFiltering ? selectFiltered(false, filteredIds) : clearAll())}
-      disabled={isFiltering ? !hasAnyVisibleFiltered : visibleCount === 0}
-      title="Hide all"
-      type="button"
-    >
-      <FontAwesomeIcon icon={faEyeSlash} />
-    </button>
-  </div>
+                <button
+                  className="btn btnDanger iconBtn"
+                  onClick={() => (isFiltering ? selectFiltered(false, filteredIds) : clearAll())}
+                  disabled={isFiltering ? !hasAnyVisibleFiltered : visibleCount === 0}
+                  title="Hide all"
+                  type="button"
+                >
+                  <FontAwesomeIcon icon={faEyeSlash} />
+                </button>
+              </div>
 
-  {/* keep the rest buttons below (select filtered, etc.) */}
-  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-    {isFiltering ? (
-      <button
-        className="btn btnPrimary"
-        onClick={() => selectFiltered(!hasAllVisibleFiltered, filteredIds)}
-        disabled={filtered.length === 0}
-        title="Select filtered"
-        type="button"
-      >
-        <FontAwesomeIcon icon={hasAllVisibleFiltered ? faCheckSquare : faSquare} />
-      </button>
-    ) : null}
-  </div>
-</div>
-
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {isFiltering ? (
+                  <button
+                    className="btn btnPrimary"
+                    onClick={() => selectFiltered(!hasAllVisibleFiltered, filteredIds)}
+                    disabled={filtered.length === 0}
+                    title="Select filtered"
+                    type="button"
+                  >
+                    <FontAwesomeIcon icon={hasAllVisibleFiltered ? faCheckSquare : faSquare} />
+                  </button>
+                ) : null}
+              </div>
+            </div>
 
             <div className="list" style={{ paddingBottom: 18 }}>
               {filtered.length === 0 ? (
@@ -1646,15 +1677,25 @@ export default function ViewMapPage() {
                 </div>
               ) : (
                 filtered.map((l) => {
+                  const orderNo = layerOrderNumberById[l.id];
                   const selectedCount = selectedFeatureIdxByLayer[l.id]?.size ?? 0;
                   const ready = l.visible && l.geojson;
                   return (
                     <div key={l.id} className="card">
                       <div className="cardTop">
                         <div style={{ minWidth: 0 }}>
-                          <div className="name" title={l.name}>
-                            {l.name}
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <div className="name" title={l.name} style={{ flex: 1, minWidth: 0 }}>
+                              {l.name}
+                            </div>
+
+                            {orderNo ? (
+                              <span className="pill" title="Draw order" style={{ padding: "4px 8px", fontSize: 10 }}>
+                                #{orderNo}
+                              </span>
+                            ) : null}
                           </div>
+
                           <div className="meta">
                             {l.geom_type ?? "-"} • SRID {l.srid ?? "-"}
                             {selectedCount > 0 ? ` • ${selectedCount}` : ""}
@@ -1670,7 +1711,7 @@ export default function ViewMapPage() {
                         </div>
 
                         <div style={{ display: "flex", gap: 8 }}>
-                          <button className="btn btnPrimary iconBtn" onClick={() => loadGeojson(l.id)} disabled={l.loading} title="Reload" type="button">
+                          <button className="btn btnPrimary iconBtn" onClick={() => loadGeojson(l.id, "map")} disabled={l.loading} title="Reload" type="button">
                             {l.loading ? <Ring size={16} /> : <FontAwesomeIcon icon={faArrowsRotate} />}
                           </button>
                           <button className="btn btnGhost iconBtn" onClick={() => openAttributeTable(l.id)} title="Attribute table" type="button">
@@ -1704,69 +1745,31 @@ export default function ViewMapPage() {
                 ) : null}
               </div>
 
-              <div className="rowTools" style={{ width: "100%", justifyContent: "space-between" }}>
-  {/* LEFT → Search */}
-  <div className="searchWrap" style={{ flex: 1, maxWidth: "70%" }}>
-    <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
-    <input
-      className="searchInput"
-      value={tableSearch}
-      onChange={(e) => setTableSearch(e.target.value)}
-      placeholder="Search…"
-    />
-  </div>
+              <div className="rowTools" style={{ justifyContent: "space-between" }}>
+                <div className="searchWrap" style={{ flex: 1, maxWidth: "70%" }}>
+                  <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
+                  <input className="searchInput" value={tableSearch} onChange={(e) => setTableSearch(e.target.value)} placeholder="Search…" />
+                </div>
 
-  {/* RIGHT → X + Reload + Close */}
-  <div style={{ display: "flex", gap: 8 }}>
-    {/* ✅ Clear search moved here */}
-    {/* <button
-      className="btn btnGhost iconBtn"
-      onClick={() => setTableSearch("")}
-      disabled={!tableSearch.trim()}
-      title="Clear search"
-      type="button"
-    >
-      <FontAwesomeIcon icon={faXmark} />
-    </button> */}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    className="btn btnPrimary iconBtn"
+                    onClick={() => tableLayerId && loadGeojson(tableLayerId, "full")}
+                    disabled={!tableLayerId || !!tableLayer?.loading}
+                    title="Reload"
+                    type="button"
+                  >
+                    {tableLayer?.loading ? <Ring size={16} /> : <FontAwesomeIcon icon={faArrowsRotate} />}
+                  </button>
 
-    {/* Reload */}
-    <button
-      className="btn btnPrimary iconBtn"
-      onClick={() => tableLayerId && loadGeojson(tableLayerId)}
-      disabled={!tableLayerId || !!tableLayer?.loading}
-      title="Reload"
-      type="button"
-    >
-      {tableLayer?.loading ? <Ring size={16} /> : <FontAwesomeIcon icon={faArrowsRotate} />}
-    </button>
-
-    {/* Close modal */}
-    <button
-      className="btn btnGhost iconBtn"
-      onClick={() => setTableOpen(false)}
-      title="Close"
-      type="button"
-    >
-      <FontAwesomeIcon icon={faXmark} />
-    </button>
-  </div>
-</div>
-
+                  <button className="btn btnGhost iconBtn" onClick={() => setTableOpen(false)} title="Close" type="button">
+                    <FontAwesomeIcon icon={faXmark} />
+                  </button>
+                </div>
+              </div>
             </div>
 
-            {!tableLayer ? (
-              <div className="emptyState">
-                <Ring size={18} />
-              </div>
-            ) : tableLayer.loading ? (
-              <div className="emptyState">
-                <Ring size={18} />
-              </div>
-            ) : !tableLayer.geojson ? (
-              <div className="emptyState">
-                <Ring size={18} />
-              </div>
-            ) : tableData.rows.length === 0 ? (
+            {!tableLayer || tableLayer.loading || !tableLayer.geojson || tableData.rows.length === 0 ? (
               <div className="emptyState">
                 <Ring size={18} />
               </div>
@@ -1777,25 +1780,79 @@ export default function ViewMapPage() {
                     <b>{tableSelectedSet.size}</b> / <b>{tableMax}</b>
                   </div>
 
-                  <div className="smallHint">
+                  <div className="smallHint" title="Filtered rows / current page">
                     <b>{tableFilteredIdxs.length}</b>
                     <span style={{ marginLeft: 10, opacity: 0.9 }}>
-                      {colorCountForTableLayer > 0 ? `${colorCountForTableLayer}` : "0"}
+                      Page <b>{tablePageSafe}</b> / <b>{tablePageCount}</b>
                     </span>
                   </div>
 
+
                   <div className="tableBarRight">
-                    {/* ✅ circular color picker */}
+                      {/* pagination controls */}
+  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+    <button
+      className="btn btnGhost miniIconBtn"
+      type="button"
+      onClick={() => setTablePage(1)}
+      disabled={tablePageSafe <= 1}
+      title="First page"
+    >
+      {"<<"}
+    </button>
+
+    <button
+      className="btn btnGhost miniIconBtn"
+      type="button"
+      onClick={() => setTablePage((p) => Math.max(1, p - 1))}
+      disabled={tablePageSafe <= 1}
+      title="Previous page"
+    >
+      {"<"}
+    </button>
+
+    <button
+      className="btn btnGhost miniIconBtn"
+      type="button"
+      onClick={() => setTablePage((p) => Math.min(tablePageCount, p + 1))}
+      disabled={tablePageSafe >= tablePageCount}
+      title="Next page"
+    >
+      {">"}
+    </button>
+
+    <button
+      className="btn btnGhost miniIconBtn"
+      type="button"
+      onClick={() => setTablePage(tablePageCount)}
+      disabled={tablePageSafe >= tablePageCount}
+      title="Last page"
+    >
+      {">>"}
+    </button>
+
+    <select
+      value={tablePageSize}
+      onChange={(e) => {
+        const next = Math.max(1, Number(e.target.value) || 50);
+        setTablePageSize(next);
+        setTablePage(1);
+      }}
+      className="btn"
+      style={{ padding: "8px 10px", borderRadius: 14 }}
+      title="Rows per page"
+    >
+      <option value={50}>50</option>
+      <option value={100}>100</option>
+      <option value={200}>200</option>
+      <option value={500}>500</option>
+    </select>
+  </div>
+
                     <div className="colorPickWrap" title="Pick color">
                       <label className="colorCircle">
                         <span className="colorSwatch" style={{ background: tableColor }} />
-                        <input
-                          className="hiddenColorInput"
-                          type="color"
-                          value={tableColor}
-                          onChange={(e) => setTableColor(e.target.value)}
-                          aria-label="Pick color"
-                        />
+                        <input className="hiddenColorInput" type="color" value={tableColor} onChange={(e) => setTableColor(e.target.value)} aria-label="Pick color" />
                       </label>
                     </div>
 
@@ -1875,12 +1932,12 @@ export default function ViewMapPage() {
                                 });
                               }
                             }}
-                            aria-label="Select all filtered rows"
-                            title="Select filtered"
+                            aria-label="Select all filtered rows across all pages"
+                            title="Select all filtered (all pages)"
+
                           />
                         </th>
 
-                        {/* ✅ row header not too wide */}
                         <th style={{ width: 150 }}>Row</th>
 
                         {tableData.columns.map((c) => (
@@ -1890,7 +1947,7 @@ export default function ViewMapPage() {
                     </thead>
 
                     <tbody>
-                      {tableFilteredRows.map((r: any) => {
+                    {tablePagedRows.map((r: any) => {
                         const idx = Number(r.__idx);
                         const checked = tableLayerId ? selectedFeatureIdxByLayer[tableLayerId]?.has(idx) ?? false : false;
 
@@ -1909,7 +1966,6 @@ export default function ViewMapPage() {
                               />
                             </td>
 
-                            {/* ✅ row tools: circle color + round buttons */}
                             <td style={{ display: "flex", alignItems: "center", gap: 10 }}>
                               <div className="colorPickWrap" title={override ? "Override color" : "Default color"}>
                                 <label className="colorCircle" style={{ width: 32, height: 32 }}>

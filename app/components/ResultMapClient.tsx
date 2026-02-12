@@ -1,4 +1,3 @@
-// C:\Users\Yummie03\Desktop\onemap\app\components\ResultMapClient.tsx
 "use client";
 
 import dynamic from "next/dynamic";
@@ -6,20 +5,24 @@ import dynamic from "next/dynamic";
 export type MapLayerInput = {
   id: string;
   name?: string;
-  color?: string; // default fallback color for the layer
+  color?: string;
   geom_type?: string | null;
   geojson: any; // FeatureCollection
+  orderNo?: number;
 };
 
 export type ResultMapProps = {
-  // backward compatibility (single layer)
   geojson?: any | null;
-
-  // multi-layer support
   layers?: MapLayerInput[];
+
+  // ✅ NEW: control basemap visibility (tiles only)
+  showBasemap?: boolean;
+
+  // ✅ NEW: background color when basemap is hidden
+  backgroundColor?: string;
 };
 
-const DEFAULT_FALLBACK_COLOR = "#0b1220";
+const DEFAULT_FALLBACK_COLOR = "#2563eb";
 
 const ResultMap = dynamic<ResultMapProps>(() => import("./ResultMap"), {
   ssr: false,
@@ -49,7 +52,7 @@ const ResultMap = dynamic<ResultMapProps>(() => import("./ResultMap"), {
             height: 36,
             borderRadius: "50%",
             border: "2px solid rgba(0,0,0,.15)",
-            borderTopColor: "#111",
+            borderTopColor: "#2563eb",
             animation: "spin .9s linear infinite",
           }}
         />
@@ -64,15 +67,15 @@ const ResultMap = dynamic<ResultMapProps>(() => import("./ResultMap"), {
 });
 
 export default function ResultMapClient(props: ResultMapProps) {
-  // ✅ Normalize:
-  // - If caller gives geojson only, wrap it into one layer.
-  // - If caller gives layers, ensure each layer has a fallback color.
   const normalizedLayers: MapLayerInput[] | undefined = (() => {
     if (Array.isArray(props.layers) && props.layers.length) {
-      return props.layers.map((l) => ({
-        ...l,
-        color: l.color ?? DEFAULT_FALLBACK_COLOR,
-      }));
+      return props.layers
+        .map((l, i) => ({
+          ...l,
+          color: l.color ?? DEFAULT_FALLBACK_COLOR,
+          orderNo: Number.isFinite(l.orderNo as any) ? (l.orderNo as number) : i + 1,
+        }))
+        .sort((a, b) => (a.orderNo ?? 9999) - (b.orderNo ?? 9999));
     }
 
     if (props.geojson && props.geojson.type === "FeatureCollection") {
@@ -83,6 +86,7 @@ export default function ResultMapClient(props: ResultMapProps) {
           color: DEFAULT_FALLBACK_COLOR,
           geom_type: null,
           geojson: props.geojson,
+          orderNo: 1,
         },
       ];
     }
@@ -90,5 +94,12 @@ export default function ResultMapClient(props: ResultMapProps) {
     return undefined;
   })();
 
-  return <ResultMap layers={normalizedLayers} geojson={props.geojson ?? null} />;
+  return (
+    <ResultMap
+      layers={normalizedLayers}
+      geojson={props.geojson ?? null}
+      showBasemap={props.showBasemap}
+      backgroundColor={props.backgroundColor}
+    />
+  );
 }

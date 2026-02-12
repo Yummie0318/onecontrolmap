@@ -1,10 +1,10 @@
-// C:\Users\Yummie03\Desktop\onemap\app\components\ResultMap.tsx
 "use client";
 
 import {
   GeoJSON,
   LayersControl,
   MapContainer,
+  Pane,
   TileLayer,
   useMap,
   useMapEvents,
@@ -28,14 +28,19 @@ L.Icon.Default.mergeOptions({
 export type MapLayerInput = {
   id: string;
   name?: string;
-  color?: string; // default layer color
+  color?: string;
   geom_type?: string | null;
-  geojson: any; // FeatureCollection
+  geojson: any;
+  orderNo?: number;
 };
 
 type Props = {
-  geojson?: any | null; // legacy single-layer
-  layers?: MapLayerInput[]; // multi-layer
+  geojson?: any | null;
+  layers?: MapLayerInput[];
+
+  // ✅ NEW
+  showBasemap?: boolean;
+  backgroundColor?: string;
 };
 
 const DEFAULT_FALLBACK_COLOR = "#0b1220";
@@ -45,9 +50,7 @@ function safeInvalidate(map: any) {
     const c = map?.getContainer?.();
     if (!c) return;
     map.invalidateSize();
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 function InvalidateOnEvents() {
@@ -71,6 +74,20 @@ function InvalidateOnEvents() {
     };
   }, [map]);
 
+  return null;
+}
+
+// ✅ extra invalidate when basemap toggles
+function InvalidateOnBasemapToggle({ showBasemap }: { showBasemap: boolean }) {
+  const map = useMap();
+  useEffect(() => {
+    const t = setTimeout(() => safeInvalidate(map), 0);
+    const t2 = setTimeout(() => safeInvalidate(map), 150);
+    return () => {
+      clearTimeout(t);
+      clearTimeout(t2);
+    };
+  }, [map, showBasemap]);
   return null;
 }
 
@@ -170,10 +187,10 @@ function FitToMany({ layers }: { layers: MapLayerInput[] }) {
 
 function styleForColor(color: string) {
   return {
-    color, // stroke
+    color,
     weight: 2.5,
     opacity: 0.95,
-    fillColor: color, // polygon fill
+    fillColor: color,
     fillOpacity: 0.28,
   } as L.PathOptions;
 }
@@ -189,7 +206,6 @@ function pointStyle(color: string) {
   } as L.CircleMarkerOptions;
 }
 
-/** ✅ pick per-feature override first, else fallback to layer color */
 function getFeatureColor(feature: any, layerColor: string) {
   const c = feature?.properties?.__color;
   if (typeof c === "string" && c.trim()) return c.trim();
@@ -242,29 +258,25 @@ function bindPopupDENR(feature: any, layer: any) {
     .map(([k, v]) => `<b>${k}</b>: ${String(v)}`)
     .join("<br/>");
 
-  layer.bindPopup(
-    `<div style="min-width:240px"><b>${title}</b><br/>${lines}</div>`
-  );
+  layer.bindPopup(`<div style="min-width:240px"><b>${title}</b><br/>${lines}</div>`);
 }
 
 export default function ResultMap(props: Props) {
-  // React 19 typings workaround
   const AnyMapContainer = MapContainer as any;
   const AnyTileLayer = TileLayer as any;
   const AnyGeoJSON = GeoJSON as any;
   const AnyLayersControl = LayersControl as any;
+  const AnyPane = Pane as any;
 
-  // ✅ Normalize layers: prefer layers[], fallback to single geojson
+  const showBasemap = props.showBasemap ?? true;
+  const backgroundColor = props.backgroundColor ?? "#ffffff";
+
   const normalizedLayers: MapLayerInput[] = useMemo(() => {
     if (props.layers?.length) {
       return props.layers
         .filter((l) => l?.geojson?.type === "FeatureCollection")
-        .map((l) => ({
-          ...l,
-          color: l.color || DEFAULT_FALLBACK_COLOR,
-        }));
+        .map((l) => ({ ...l, color: l.color || DEFAULT_FALLBACK_COLOR }));
     }
-
     if (props.geojson?.type === "FeatureCollection") {
       return [
         {
@@ -272,46 +284,31 @@ export default function ResultMap(props: Props) {
           name: "Layer",
           color: DEFAULT_FALLBACK_COLOR,
           geojson: props.geojson,
+          orderNo: 1,
         },
       ];
     }
-
     return [];
   }, [props.layers, props.geojson]);
 
+  const orderedLayers = useMemo(() => {
+    return normalizedLayers.slice().sort((a, b) => (a.orderNo ?? 9999) - (b.orderNo ?? 9999));
+  }, [normalizedLayers]);
+
   const hasAnyData = useMemo(() => {
-    return normalizedLayers.some(
-      (l) => Array.isArray(l.geojson?.features) && l.geojson.features.length > 0
-    );
-  }, [normalizedLayers]);
+    return orderedLayers.some((l) => Array.isArray(l.geojson?.features) && l.geojson.features.length > 0);
+  }, [orderedLayers]);
 
-  // ✅ key should change when caller forces rerender via parent "key"
-  // but also include layer ids + counts to avoid stale GeoJSON layers
   const mapKey = useMemo(() => {
-    const ids = normalizedLayers.map((l) => l.id).join("|");
-    const counts = normalizedLayers
-      .map((l) =>
-        Array.isArray(l.geojson?.features) ? l.geojson.features.length : 0
-      )
+    const ids = orderedLayers.map((l) => l.id).join("|");
+    const counts = orderedLayers
+      .map((l) => (Array.isArray(l.geojson?.features) ? l.geojson.features.length : 0))
       .join(",");
-    return `map-${ids}-${counts}`;
-  }, [normalizedLayers]);
+    const orders = orderedLayers.map((l) => `${l.id}:${l.orderNo ?? 0}`).join("|");
+    return `map-${ids}-${counts}-${orders}`;
+  }, [orderedLayers]);
 
-  // ✅ track tile loading
-  const [tilesOk, setTilesOk] = useState(false);
-  const tileOkRef = useRef(false);
-
-  const tileHandlers = {
-    load: () => {
-      if (!tileOkRef.current) {
-        tileOkRef.current = true;
-        setTilesOk(true);
-      }
-    },
-    tileerror: (e: any) => {
-      console.warn("Tile error:", e);
-    },
-  } as any;
+  const Z_BASE = 450;
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
@@ -320,6 +317,7 @@ export default function ResultMap(props: Props) {
         center={[17.7, 121.7]}
         zoom={8}
         zoomControl
+        attributionControl={showBasemap} // ✅ hide attribution when basemap off
         style={{
           position: "absolute",
           inset: 0,
@@ -327,7 +325,7 @@ export default function ResultMap(props: Props) {
           height: "100%",
           borderRadius: 16,
           border: "1px solid #e5e5e5",
-          background: "#fff",
+          background: backgroundColor, // ✅ white background when basemap off
         }}
         whenReady={(ctx: any) => {
           ctx?.target?.invalidateSize?.();
@@ -335,121 +333,88 @@ export default function ResultMap(props: Props) {
         }}
       >
         <InvalidateOnEvents />
+        <InvalidateOnBasemapToggle showBasemap={showBasemap} />
 
-        <AnyLayersControl position="topright">
-          <AnyLayersControl.BaseLayer checked name="Street (OSM)">
-            <AnyTileLayer
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-              attribution="&copy; OpenStreetMap contributors"
-              eventHandlers={tileHandlers}
-            />
-          </AnyLayersControl.BaseLayer>
+        {/* ✅ Basemap tiles are OPTIONAL.
+            Map + vectors stay ON, so projection/fitBounds still works */}
+        {showBasemap ? (
+          <AnyLayersControl position="topright">
+            <AnyLayersControl.BaseLayer checked name="Street (OSM)">
+              <AnyTileLayer
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                attribution="&copy; OpenStreetMap contributors"
+              />
+            </AnyLayersControl.BaseLayer>
 
-          <AnyLayersControl.BaseLayer name="Light (Carto)">
-            <AnyTileLayer
-              url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-              attribution="&copy; OpenStreetMap contributors &copy; CARTO"
-              eventHandlers={tileHandlers}
-            />
-          </AnyLayersControl.BaseLayer>
+            <AnyLayersControl.BaseLayer name="Light (Carto)">
+              <AnyTileLayer
+                url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+                attribution="&copy; OpenStreetMap contributors &copy; CARTO"
+              />
+            </AnyLayersControl.BaseLayer>
 
-          <AnyLayersControl.BaseLayer name="Satellite (Esri)">
-            <AnyTileLayer
-              url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-              attribution="Tiles &copy; Esri"
-              eventHandlers={tileHandlers}
-            />
-          </AnyLayersControl.BaseLayer>
-        </AnyLayersControl>
+            <AnyLayersControl.BaseLayer name="Satellite (Esri)">
+              <AnyTileLayer
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                attribution="Tiles &copy; Esri"
+              />
+            </AnyLayersControl.BaseLayer>
+          </AnyLayersControl>
+        ) : null}
 
-        {/* ✅ fit bounds */}
-        {props.layers?.length ? (
-          <FitToMany layers={normalizedLayers} />
-        ) : (
-          <FitToGeoJson geojson={props.geojson ?? null} />
-        )}
+        {/* ✅ fit bounds still works whether basemap is ON or OFF */}
+        {props.layers?.length ? <FitToMany layers={orderedLayers} /> : <FitToGeoJson geojson={props.geojson ?? null} />}
 
-        {/* ✅ Render each layer (per-feature color override supported via properties.__color) */}
-        {normalizedLayers.map((layer) => {
+        {orderedLayers.map((layer) => {
           const feats = layer.geojson?.features;
           const hasData = Array.isArray(feats) && feats.length > 0;
           if (!hasData) return null;
 
           const baseColor = layer.color || DEFAULT_FALLBACK_COLOR;
-
-          // key includes feature count only (parent already remounts ResultMapClient with key)
           const geoKey = `geo-${layer.id}-${feats.length}`;
+          const paneName = `pane-${layer.id}`;
+          const z = Z_BASE + (layer.orderNo ?? 0);
 
           return (
-            <AnyGeoJSON
-              key={geoKey}
-              data={layer.geojson}
-              // ✅ IMPORTANT: use feature to get per-feature color
-              style={(feature: any) => {
-                const c = getFeatureColor(feature, baseColor);
-                return styleForColor(c);
-              }}
-              // ✅ IMPORTANT: points also use per-feature override
-              pointToLayer={(feature: any, latlng: any) => {
-                const c = getFeatureColor(feature, baseColor);
-                return L.circleMarker(latlng, pointStyle(c));
-              }}
-              onEachFeature={(feature: any, leafletLayer: any) => {
-                bindPopupDENR(feature, leafletLayer);
+            <AnyPane key={`pane-${layer.id}`} name={paneName} style={{ zIndex: z }}>
+              <AnyGeoJSON
+                key={geoKey}
+                data={layer.geojson}
+                pane={paneName}
+                style={(feature: any) => styleForColor(getFeatureColor(feature, baseColor))}
+                pointToLayer={(feature: any, latlng: any) =>
+                  L.circleMarker(latlng, pointStyle(getFeatureColor(feature, baseColor)))
+                }
+                onEachFeature={(feature: any, leafletLayer: any) => {
+                  bindPopupDENR(feature, leafletLayer);
 
-                // Optional: hover highlight while keeping the same color
-                leafletLayer.on?.("mouseover", () => {
-                  const c = getFeatureColor(feature, baseColor);
-                  try {
-                    leafletLayer.setStyle?.({
-                      ...styleForColor(c),
-                      weight: 4,
-                      fillOpacity: 0.38,
-                    });
-                    leafletLayer.bringToFront?.();
-                  } catch {}
-                });
+                  leafletLayer.on?.("mouseover", () => {
+                    const c = getFeatureColor(feature, baseColor);
+                    try {
+                      leafletLayer.setStyle?.({ ...styleForColor(c), weight: 4, fillOpacity: 0.38 });
+                    } catch {}
+                  });
 
-                leafletLayer.on?.("mouseout", () => {
-                  const c = getFeatureColor(feature, baseColor);
-                  try {
-                    leafletLayer.setStyle?.(styleForColor(c));
-                  } catch {}
-                });
-              }}
-            />
+                  leafletLayer.on?.("mouseout", () => {
+                    const c = getFeatureColor(feature, baseColor);
+                    try {
+                      leafletLayer.setStyle?.(styleForColor(c));
+                    } catch {}
+                  });
+                }}
+              />
+            </AnyPane>
           );
         })}
       </AnyMapContainer>
 
-      {!tilesOk ? (
+      {/* optional hint when no data */}
+      {!hasAnyData ? (
         <div
           style={{
             position: "absolute",
             left: 14,
             bottom: 14,
-            background: "rgba(255,255,255,0.96)",
-            border: "1px solid #e7e7e7",
-            borderRadius: 12,
-            padding: "10px 12px",
-            fontSize: 12,
-            color: "#111",
-            boxShadow: "0 18px 60px rgba(0,0,0,0.12)",
-          }}
-        >
-          <b>Loading basemap…</b>
-          <div style={{ color: "#555", marginTop: 2 }}>
-            If this stays, open DevTools → Network → look for tile requests.
-          </div>
-        </div>
-      ) : null}
-
-      {tilesOk && !hasAnyData ? (
-        <div
-          style={{
-            position: "absolute",
-            left: 14,
-            bottom: 62,
             background: "rgba(255,255,255,0.95)",
             border: "1px solid #e7e7e7",
             borderRadius: 12,
@@ -460,10 +425,7 @@ export default function ResultMap(props: Props) {
           }}
         >
           <b>No results</b>
-          <div style={{ color: "#555", marginTop: 2 }}>
-            Turn on a layer from the list (checkbox), or try searching a layer
-            name.
-          </div>
+          <div style={{ color: "#555", marginTop: 2 }}>Turn on a layer from the list.</div>
         </div>
       ) : null}
     </div>

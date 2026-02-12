@@ -424,6 +424,12 @@ export default function AdminLayersPage() {
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+    // Rename modal state
+    const [showRename, setShowRename] = useState(false);
+    const [renameId, setRenameId] = useState<string | null>(null);
+    const [renameValue, setRenameValue] = useState("");
+    const [renaming, setRenaming] = useState(false);
+  
   // Drawer state (edit modal)
   const [showAttrDrawer, setShowAttrDrawer] = useState(false);
 
@@ -832,6 +838,73 @@ export default function AdminLayersPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
+  function openRename(layer: LayerRow) {
+    setRenameId(layer.id);
+    setRenameValue(layer.name ?? "");
+    setShowRename(true);
+  }
+
+  function closeRename() {
+    if (renaming) return;
+    setShowRename(false);
+    setRenameId(null);
+    setRenameValue("");
+  }
+
+  async function renameLayer() {
+    if (!renameId) return;
+
+    const newName = renameValue.trim();
+    if (!newName) {
+      showNotice("warn", "Name required", "Please enter a layer name.");
+      return;
+    }
+
+    const ok = await confirmUI({
+      title: "Rename this layer?",
+      message: `New name:\n\n"${newName}"`,
+      confirmText: "Rename",
+      cancelText: "Cancel",
+      tone: "default",
+    });
+    if (!ok) return;
+
+    setRenaming(true);
+    setError("");
+    showNotice("loading", "Renaming…", "Updating layer name", 999999, true);
+
+    try {
+      // ✅ API will be next: PATCH /api/layers/:id
+      const r = await fetch(`/api/layers/${renameId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newName }),
+      });
+
+      const text = await r.text();
+      const j: any = safeJsonParse(text);
+      if (!j.ok) throw new Error(j.error || "Rename failed");
+
+      // ✅ update local list immediately
+      setLayers((prev) => prev.map((l) => (l.id === renameId ? { ...l, name: newName } : l)));
+
+      showNotice("success", "Renamed", `Layer updated • ${formatTime(new Date())}`);
+
+      // ✅ if currently selected, update title area too
+      if (selectedId === renameId) {
+        // selectedLayer is derived from layers so it updates automatically
+      }
+
+      closeRename();
+    } catch (e: any) {
+      setError(e?.message ?? "Rename failed");
+      showNotice("error", "Rename failed", e?.message ?? "Please try again.");
+    } finally {
+      setRenaming(false);
+    }
+  }
+
+
   function closeUpload() {
     if (uploading) return;
     setShowUpload(false);
@@ -906,6 +979,7 @@ export default function AdminLayersPage() {
 
       if (e.key === "Escape") {
         if (showUpload) closeUpload();
+        if (showRename) closeRename();
         if (showAttrDrawer) {
           (async () => {
             const ok = await confirmLoseChanges();
@@ -1438,6 +1512,17 @@ export default function AdminLayersPage() {
                             </button>
                           </Tooltip>
 
+                          <Tooltip text="Rename layer" side="top">
+                          <button
+                            onClick={() => openRename(l)}
+                            disabled={busy}
+                            aria-label="Rename"
+                            className="iconBtn"
+                          >
+                            <FontAwesomeIcon icon={faPenToSquare} className="iconEdit" />
+                          </button>
+                        </Tooltip>
+
                           <Tooltip text="Delete" side="top">
                             <button onClick={() => deleteLayer(l.id, l.name)} disabled={busy} aria-label="Delete" className="iconBtn">
                               <FontAwesomeIcon icon={faTrash} className="iconDelete" />
@@ -1568,6 +1653,47 @@ export default function AdminLayersPage() {
           </div>
         </div>
       ) : null}
+
+{showRename ? (
+  <div role="dialog" aria-modal="true" onClick={closeRename} className="overlay" style={{ zIndex: 10050 }}>
+    <div onClick={(e) => e.stopPropagation()} className="modal">
+      <div className="modalHead">
+        <div className="modalTitleRow">
+          <span className="modalDot dotBlue" />
+          <div className="modalTitle">Rename Layer</div>
+        </div>
+
+        <Tooltip text="Close" side="left">
+          <button onClick={closeRename} disabled={renaming} aria-label="Close" className="iconBtn">
+            <FontAwesomeIcon icon={faXmark} className="iconNeutral" />
+          </button>
+        </Tooltip>
+      </div>
+
+      <div className="modalBody">
+        <div style={{ display: "grid", gap: 10 }}>
+          <input
+            placeholder="New layer name"
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            className="fieldInput fieldInputKey"
+            autoFocus
+          />
+          <div className="hint">Tip: Keep names short and unique (e.g., “CBFMA Alcala 2024”).</div>
+        </div>
+      </div>
+
+      <div className="modalFoot">
+        <button onClick={closeRename} disabled={renaming} className="btnGhost">
+          Cancel
+        </button>
+        <button onClick={renameLayer} disabled={renaming || !renameValue.trim()} className="btnPrimary">
+          {renaming ? "Renaming…" : "Rename"}
+        </button>
+      </div>
+    </div>
+  </div>
+) : null}
 
       {/* ✅ EDIT DRAWER */}
       {showAttrDrawer ? (
