@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { pool } from "@/lib/db";
+import { poolDb2 } from "@/lib/db";
 
 type GeoJSONFeatureCollection = {
   type: "FeatureCollection";
@@ -23,7 +23,6 @@ function inferFieldTypes(props: Record<string, any>[]) {
           : typeof v === "string"
           ? "string"
           : "json";
-      // keep first non-null type seen
       if (!types[k]) types[k] = t;
     }
   }
@@ -42,7 +41,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Basic file checks
     if (file.size > 25 * 1024 * 1024) {
       return NextResponse.json(
         { ok: false, error: "File too large (max 25MB)." },
@@ -56,10 +54,7 @@ export async function POST(req: Request) {
     try {
       geo = JSON.parse(text);
     } catch {
-      return NextResponse.json(
-        { ok: false, error: "Invalid JSON." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Invalid JSON." }, { status: 400 });
     }
 
     if (geo?.type !== "FeatureCollection" || !Array.isArray(geo.features)) {
@@ -70,13 +65,9 @@ export async function POST(req: Request) {
     }
 
     if (geo.features.length === 0) {
-      return NextResponse.json(
-        { ok: false, error: "GeoJSON has no features." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "GeoJSON has no features." }, { status: 400 });
     }
 
-    // Determine geometry type (from first feature)
     const firstGeomType = geo.features[0]?.geometry?.type;
     if (!firstGeomType) {
       return NextResponse.json(
@@ -85,18 +76,18 @@ export async function POST(req: Request) {
       );
     }
 
-    // Collect props for schema inference
     const propsList: Record<string, any>[] = geo.features
       .map((f) => (f.properties && typeof f.properties === "object" ? f.properties : {}))
-      .slice(0, 200); // limit inference workload
+      .slice(0, 200);
 
     const fields = inferFieldTypes(propsList);
 
-    const client = await pool.connect();
+    // ✅ IMPORTANT: write uploads to DB2 (new database)
+    const client = await poolDb2.connect();
+
     try {
       await client.query("BEGIN");
 
-      // 1) Insert layer
       const layerName =
         (form.get("name") as string | null)?.trim() ||
         file.name.replace(/\.[^/.]+$/, "") ||
@@ -113,26 +104,24 @@ export async function POST(req: Request) {
 
       const layerId: string = insertLayer.rows[0].id;
 
-      // 2) Insert features (batch)
-      // Use PostGIS: ST_GeomFromGeoJSON(geom_json) then force SRID 4326
-      const batchSize = 300; // safe chunk size
+      const batchSize = 300;
       for (let i = 0; i < geo.features.length; i += batchSize) {
         const chunk = geo.features.slice(i, i + batchSize);
 
-        // Build multi-values insert
         const values: any[] = [];
         const placeholders: string[] = [];
 
         chunk.forEach((f, idx) => {
           const base = idx * 3;
           const geomJson = f.geometry;
-          if (!geomJson) {
-            throw new Error(`Feature at index ${i + idx} has no geometry.`);
-          }
+          if (!geomJson) throw new Error(`Feature at index ${i + idx} has no geometry.`);
+
           const props = f.properties && typeof f.properties === "object" ? f.properties : {};
 
           values.push(layerId, JSON.stringify(geomJson), JSON.stringify(props));
-          placeholders.push(`($${base + 1}, ST_SetSRID(ST_GeomFromGeoJSON($${base + 2}), 4326), $${base + 3}::jsonb)`);
+          placeholders.push(
+            `($${base + 1}, ST_SetSRID(ST_GeomFromGeoJSON($${base + 2}), 4326), $${base + 3}::jsonb)`
+          );
         });
 
         await client.query(
@@ -148,13 +137,16 @@ export async function POST(req: Request) {
 
       return NextResponse.json({
         ok: true,
+        db: "db2",
         layerId,
         name: layerName,
         featureCount: geo.features.length,
         geomType: firstGeomType,
       });
     } catch (e: any) {
-      await client.query("ROLLBACK");
+      try {
+        await client.query("ROLLBACK");
+      } catch {}
       return NextResponse.json(
         { ok: false, error: e?.message ?? "Upload failed." },
         { status: 500 }

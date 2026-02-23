@@ -6,6 +6,8 @@ import Image from "next/image";
 
 type ToastKind = "success" | "error" | "info";
 
+const SESSION_MS = 5 * 60 * 1000; // ✅ 5 minutes
+
 function cx(...cls: Array<string | false | null | undefined>) {
   return cls.filter(Boolean).join(" ");
 }
@@ -89,8 +91,22 @@ function EyeIcon({ open }: { open: boolean }) {
   );
 }
 
+type ApiLoginResp =
+  | { ok: true; user: { id: number; username: string; email: string; usertype: string } }
+  | { ok: false; error: string };
+
+function doLogout(redirectReason: "expired" | "logout" = "logout") {
+  try {
+    localStorage.removeItem("auth_user");
+    localStorage.removeItem("is_logged_in");
+    localStorage.removeItem("login_time");
+    localStorage.removeItem("remember_me");
+  } catch {}
+  window.location.href = `/login?reason=${redirectReason}`;
+}
+
 export default function LoginPage() {
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
   const [showPw, setShowPw] = useState(false);
@@ -100,6 +116,27 @@ export default function LoginPage() {
   const [toast, setToast] = useState<{ kind: ToastKind; title: string; message?: string } | null>(null);
 
   useEffect(() => {
+    // ✅ If already logged in, check expiry (5 minutes)
+    try {
+      const loggedIn = localStorage.getItem("is_logged_in") === "1";
+      const u = localStorage.getItem("auth_user");
+      const loginTime = Number(localStorage.getItem("login_time") || "0");
+
+      if (loggedIn && u) {
+        const age = Date.now() - loginTime;
+
+        // If no login_time stored (old sessions), force logout for safety
+        if (!loginTime || age >= SESSION_MS) {
+          doLogout("expired");
+          return;
+        }
+
+        // Still valid -> redirect to protected page
+        window.location.href = "/admin/layers";
+        return;
+      }
+    } catch {}
+
     const params = new URLSearchParams(window.location.search);
     const reason = params.get("reason");
     if (reason === "expired") setToast({ kind: "info", title: "Session expired", message: "Please login again." });
@@ -107,25 +144,55 @@ export default function LoginPage() {
   }, []);
 
   const canSubmit = useMemo(() => {
-    if (!email.trim()) return false;
+    if (!username.trim()) return false;
     if (!password.trim()) return false;
     return true;
-  }, [email, password]);
+  }, [username, password]);
 
-  function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
-    setBusy(true);
+    if (!canSubmit || busy) return;
 
-    // UI only (no backend yet)
-    setTimeout(() => {
+    setBusy(true);
+    setToast(null);
+
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+
+      const data = (await res.json()) as ApiLoginResp;
+
+      if (!data.ok) {
+        setToast({ kind: "error", title: "Login failed", message: data.error || "Invalid credentials." });
+        setBusy(false);
+        return;
+      }
+
+      // ✅ Store session (localStorage)
+      localStorage.setItem("auth_user", JSON.stringify(data.user));
+      localStorage.setItem("is_logged_in", "1");
+
+      // ✅ Save login time so we can expire after 5 mins
+      localStorage.setItem("login_time", Date.now().toString());
+
+      // Optional: store remember preference (for future use)
+      localStorage.setItem("remember_me", remember ? "1" : "0");
+
+      setToast({ kind: "success", title: "Welcome", message: `Logged in as ${data.user.username}` });
+
+      // ✅ Redirect to protected page
+      window.location.href = "/admin/layers";
+    } catch (err: any) {
+      setToast({ kind: "error", title: "Network error", message: err?.message ?? "Please try again." });
       setBusy(false);
-      setToast({ kind: "info", title: "UI ready", message: "Backend not connected yet." });
-    }, 650);
+    }
   }
 
   function goGuest() {
-    window.location.href = "http://localhost:3000/viewmap";
+    window.location.href = "/viewmap";
   }
 
   return (
@@ -170,7 +237,6 @@ export default function LoginPage() {
           padding: 24px 14px;
         }
 
-        /* ✅ Only keep the box (single card) */
         .card{
           width: min(520px, 100%);
           border: 1px solid var(--stroke);
@@ -190,7 +256,6 @@ export default function LoginPage() {
           margin-bottom: 14px;
         }
 
-        /* ✅ Logo + App name (clean, inside card) */
         .brand{
           display:flex;
           align-items:center;
@@ -225,18 +290,6 @@ export default function LoginPage() {
           white-space:nowrap;
           overflow:hidden;
           text-overflow: ellipsis;
-        }
-
-        .badge{
-          font-size: 12px;
-          font-weight: 650;
-          color: rgba(11,18,32,.78);
-          border: 1px solid var(--stroke);
-          padding: 7px 10px;
-          border-radius: 999px;
-          background: rgba(255,255,255,.84);
-          white-space:nowrap;
-          flex: 0 0 auto;
         }
 
         .header{
@@ -376,7 +429,6 @@ export default function LoginPage() {
           flex-wrap:wrap;
         }
 
-        /* Toast */
         .toast{
           position: fixed;
           top: 14px;
@@ -419,18 +471,13 @@ export default function LoginPage() {
         }
         .toastX:hover{ background: rgba(11,18,32,.06); }
 
-        /* Mobile tweaks */
         @media (max-width: 420px){
           .card{ padding: 18px; border-radius: 22px; }
-          .badge{ display:none; } /* keeps header clean on tiny screens */
         }
       `}</style>
 
-      {toast ? (
-        <Toast kind={toast.kind} title={toast.title} message={toast.message} onClose={() => setToast(null)} />
-      ) : null}
+      {toast ? <Toast kind={toast.kind} title={toast.title} message={toast.message} onClose={() => setToast(null)} /> : null}
 
-      {/* ✅ ONLY THE BOX */}
       <div className="card" role="main" aria-label="Login">
         <div className="topRow">
           <div className="brand">
@@ -442,7 +489,6 @@ export default function LoginPage() {
               <div className="brandSub">PENRO Cagayan</div>
             </div>
           </div>
-
         </div>
 
         <div className="header">
@@ -452,14 +498,14 @@ export default function LoginPage() {
 
         <form onSubmit={onSubmit}>
           <div className="field">
-            <label htmlFor="email">Email</label>
+            <label htmlFor="username">Username</label>
             <div className="inputWrap">
               <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@denr.gov.ph"
+                id="username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="admin"
                 autoComplete="username"
               />
             </div>
@@ -493,14 +539,14 @@ export default function LoginPage() {
               <input checked={remember} onChange={(e) => setRemember(e.target.checked)} type="checkbox" />
               Remember me
             </label>
-
-            <button className="btn btnPrimary" type="button" onClick={goGuest}>
-              View Map
-            </button>
           </div>
 
           <button className="btn btnPrimary btnWide" disabled={!canSubmit || busy} type="submit">
             {busy ? "Signing in…" : <strong>Sign in</strong>}
+          </button>
+
+          <button className="btn btnPrimary btnWide" type="button" onClick={goGuest} disabled={busy}>
+            View Map
           </button>
 
           <div className="help">

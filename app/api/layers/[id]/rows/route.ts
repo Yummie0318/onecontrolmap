@@ -1,9 +1,30 @@
+// app/api/layers/[id]/rows/route.ts
 import { NextResponse } from "next/server";
-import { pool } from "@/lib/db";
+import { poolDb1, poolDb2 } from "@/lib/db";
 
 function toInt(v: any, d = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.trunc(n) : d;
+}
+
+async function pickDbByLayerId(layerId: string) {
+  const c1 = await poolDb1.connect();
+  try {
+    const r1 = await c1.query(`SELECT 1 FROM public.layers WHERE id = $1 LIMIT 1`, [layerId]);
+    if (r1.rowCount) return { db: "db1" as const, pool: poolDb1 };
+  } finally {
+    c1.release();
+  }
+
+  const c2 = await poolDb2.connect();
+  try {
+    const r2 = await c2.query(`SELECT 1 FROM public.layers WHERE id = $1 LIMIT 1`, [layerId]);
+    if (r2.rowCount) return { db: "db2" as const, pool: poolDb2 };
+  } finally {
+    c2.release();
+  }
+
+  return null;
 }
 
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -15,7 +36,12 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
 
   const q = String(searchParams.get("q") ?? "").trim(); // search whole layer
 
-  const client = await pool.connect();
+  const picked = await pickDbByLayerId(layerId);
+  if (!picked) {
+    return NextResponse.json({ ok: false, error: "Layer not found." }, { status: 404 });
+  }
+
+  const client = await picked.pool.connect();
   try {
     // ✅ total count (with optional search)
     const totalRes = await client.query(
@@ -67,7 +93,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       ...(r.props ?? {}),
     }));
 
-    return NextResponse.json({ ok: true, columns, rows, total, limit, offset, q });
+    return NextResponse.json({ ok: true, columns, rows, total, limit, offset, q, db: picked.db });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message ?? "Failed" }, { status: 500 });
   } finally {

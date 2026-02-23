@@ -15,10 +15,14 @@ export type ResultMapProps = {
   geojson?: any | null;
   layers?: MapLayerInput[];
 
-  // ✅ NEW: control basemap visibility (tiles only)
-  showBasemap?: boolean;
+  // ✅ NEW: selected feature (by properties.__fid)
+  selectedFid?: string | null;
 
-  // ✅ NEW: background color when basemap is hidden
+  // ✅ NEW: callback when a feature is clicked
+  onFeatureFidClick?: (fid: string) => void;
+
+  // ✅ existing
+  showBasemap?: boolean;
   backgroundColor?: string;
 };
 
@@ -98,6 +102,8 @@ export default function ResultMapClient(props: ResultMapProps) {
     <ResultMap
       layers={normalizedLayers}
       geojson={props.geojson ?? null}
+      selectedFid={props.selectedFid ?? null}
+      onFeatureFidClick={props.onFeatureFidClick}
       showBasemap={props.showBasemap}
       backgroundColor={props.backgroundColor}
     />

@@ -1,6 +1,7 @@
-// C:\Users\Yummie03\Desktop\onemap\app\api\map\run-plan\route.ts
+// app/api/map/run-plan/route.ts
 import { NextResponse } from "next/server";
-import { pool } from "@/lib/db";
+import { poolDb1, poolDb2 } from "@/lib/db";
+import type { Pool } from "pg";
 
 type Op = "=" | "!=" | ">" | ">=" | "<" | "<=" | "ilike";
 type DatasetKey = "CBFMA" | "PA" | "CSC" | "UNKNOWN";
@@ -28,7 +29,6 @@ function normalizeValue(val: string) {
     .trim();
 }
 
-// DB-side normalization: punctuation -> space, collapse spaces
 function normalizeTextSql(expr: string) {
   return `
     regexp_replace(
@@ -65,8 +65,6 @@ const STOPWORDS = new Set([
   "show","display","list","find","search","get","give","provide","tell",
   "all","records","record","entries","entry","data","map","layer",
   "of","in","at","within","near","for","from","on","the","a","an","to",
-
-  // ✅ important: do NOT turn these into keywords (they kill results)
   "smallest","largest","biggest","lowest","highest","minimum","maximum",
   "area","hectare","hectares","ha","km","square","sqm"
 ]);
@@ -76,7 +74,7 @@ function isStopwordToken(t: string) {
   return !x || STOPWORDS.has(x);
 }
 
-/* ---------------- structured fields (protect from widening) ---------------- */
+/* ---------------- structured fields ---------------- */
 
 const STRUCTURED_FIELDS = new Set([
   "CENRO",
@@ -99,8 +97,6 @@ const STRUCTURED_FIELDS = new Set([
   "BARANGAY",
   "PA",
   "PA_1",
-  // (optional) CSC-specific structured fields could be added later if needed:
-  // "CSC_NUMBER","NAME_CSC","WATERSHED","DISTRICT","LC_NO","HOLD_ADD","CONT_PERS","YR_ASSESS"
 ]);
 
 function isStructuredFieldName(field: string) {
@@ -129,7 +125,7 @@ function datasetPatterns(dataset: DatasetKey) {
     case "PA":
       return ["PA_%", "PA%", "PROTECTED_AREA%", "PROTECTEDAREA%"];
     case "CSC":
-      return ["CSC_%", "CSC%"]; // ✅ matches CSC_Alcala, CSC_Aparri, etc.
+      return ["CSC_%", "CSC%"];
     default:
       return ["%"];
   }
@@ -151,7 +147,7 @@ function stripCommandWordsForKeyword(raw: string) {
   return s
     .replace(/\b(cbfma|cbfm|tenure)\b/g, " ")
     .replace(/\b(pa|protected\s+area(s)?|protectedarea(s)?|protected|nipas)\b/g, " ")
-    .replace(/\b(csc|csc_number|csc_no|csc\s*number|csc\s*no)\b/g, " ") // ✅ remove CSC tokens
+    .replace(/\b(csc|csc_number|csc_no|csc\s*number|csc\s*no)\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -189,16 +185,15 @@ function tokenizeMeaningful(raw: string) {
   return Array.from(new Set(tokens));
 }
 
-/* ---------------- NEW: get real fields from DB ---------------- */
+/* ---------------- fields cache (per db + layerIds) ---------------- */
 
-let FIELDS_CACHE: { at: number; key: string; fields: string[] } | null = null;
+let FIELDS_CACHE: Record<string, { at: number; fields: string[] }> = {};
 
-async function getAvailableFields(layerIds: string[]) {
-  const key = layerIds.slice().sort().join("|");
+async function getAvailableFields(pool: Pool, layerIds: string[]) {
+  const key = `${pool === poolDb2 ? "db2" : "db1"}:${layerIds.slice().sort().join("|")}`;
   const now = Date.now();
-  if (FIELDS_CACHE && FIELDS_CACHE.key === key && now - FIELDS_CACHE.at < 30_000) {
-    return FIELDS_CACHE.fields;
-  }
+  const hit = FIELDS_CACHE[key];
+  if (hit && now - hit.at < 30_000) return hit.fields;
 
   const r = await pool.query(
     `
@@ -216,7 +211,7 @@ async function getAvailableFields(layerIds: string[]) {
   }
 
   const fields = Array.from(set);
-  FIELDS_CACHE = { at: now, key, fields };
+  FIELDS_CACHE[key] = { at: now, fields };
   return fields;
 }
 
@@ -238,7 +233,7 @@ function resolveFieldCandidates(requested: string, availableFields: string[]) {
   return [...exact, ...starts, ...contains].slice(0, 6);
 }
 
-/* ---------------- dataset auto-pick (CBFMA vs PA vs CSC) ---------------- */
+/* ---------------- dataset auto-pick (DB1+DB2) ---------------- */
 
 async function autoPickDatasetFromDB(rawQuery: string): Promise<DatasetKey> {
   const keep = stripCommandWordsKeepDataset(rawQuery);
@@ -252,14 +247,11 @@ async function autoPickDatasetFromDB(rawQuery: string): Promise<DatasetKey> {
 
   const like = `%${normalizeValue(tokens[0])}%`;
   const candidates: DatasetKey[] = ["CBFMA", "PA", "CSC"];
-
   let best: { ds: DatasetKey; score: number } = { ds: "UNKNOWN", score: 0 };
 
   for (const ds of candidates) {
     const patterns = datasetPatterns(ds);
-
-    const r = await pool.query(
-      `
+    const sql = `
       WITH layer_ids AS (
         SELECT id
         FROM public.layers
@@ -273,18 +265,21 @@ async function autoPickDatasetFromDB(rawQuery: string): Promise<DatasetKey> {
           FROM jsonb_each_text(f.props) kv
           WHERE ${normalizeTextSql("kv.value")} LIKE $${patterns.length + 1}
         )
-      `,
-      [...patterns, like]
-    );
+    `;
 
-    const score = Number(r.rows?.[0]?.c ?? 0);
+    const [r1, r2] = await Promise.all([
+      poolDb1.query(sql, [...patterns, like]).catch(() => ({ rows: [{ c: 0 }] })),
+      poolDb2.query(sql, [...patterns, like]).catch(() => ({ rows: [{ c: 0 }] })),
+    ]);
+
+    const score = Number(r1.rows?.[0]?.c ?? 0) + Number(r2.rows?.[0]?.c ?? 0);
     if (score > best.score) best = { ds, score };
   }
 
   return best.ds;
 }
 
-/* ---------------- WORD / WHOLE-TOKEN matching ---------------- */
+/* ---------------- WORD matching ---------------- */
 
 function buildWordLikePattern(token: string) {
   const t = normalizeValue(token);
@@ -319,15 +314,11 @@ function buildFilterClauseDynamic(f: Filter, pStart: number, availableFields: st
   const op = f.op;
   const value = f.value;
 
-  // __keyword: search ANY props value
   if (canonicalFieldName(f.field) === "__KEYWORD" && typeof value === "string") {
     const token = normalizeValue(value);
     if (token.length < 2) return null;
-
-    // ignore stopwords so they never kill results
     if (isStopwordToken(token)) return null;
 
-    // short tokens => word-match
     const useWord = token.length <= 4;
     const likeParam = useWord ? buildWordLikePattern(token) : `%${token}%`;
 
@@ -344,7 +335,6 @@ function buildFilterClauseDynamic(f: Filter, pStart: number, availableFields: st
     return { clauseSql: `(${clauseSql})`, params: [likeParam], next: pStart + 1 };
   }
 
-  // requested field -> candidates
   const candidates = resolveFieldCandidates(f.field, availableFields).filter((x) => isSafeFieldName(String(x)));
   const fieldsToTry = candidates.length ? candidates : [String(f.field)];
 
@@ -407,6 +397,199 @@ function buildFilterClauseDynamic(f: Filter, pStart: number, availableFields: st
   return { clauseSql, params, next: p };
 }
 
+/* ---------------- geojson merging ---------------- */
+
+function asFeatureCollection(fc: any) {
+  if (!fc || fc.type !== "FeatureCollection" || !Array.isArray(fc.features)) {
+    return { type: "FeatureCollection", features: [] as any[] };
+  }
+  return fc;
+}
+
+function mergeFeatureCollections(a: any, b: any) {
+  const A = asFeatureCollection(a);
+  const B = asFeatureCollection(b);
+
+  // Simple merge (concat). If you need dedupe later, we can do it by hashing.
+  return { type: "FeatureCollection", features: [...A.features, ...B.features] };
+}
+
+/* ---------------- core runner per DB ---------------- */
+
+async function findMatchingLayers(pool: Pool, patterns: string[]) {
+  const layerRes = await pool.query(
+    `
+    SELECT l.id, l.name, l.created_at
+    FROM public.layers l
+    WHERE (${patterns.map((_, i) => `l.name ILIKE $${i + 1}`).join(" OR ")})
+    ORDER BY l.created_at DESC
+    `,
+    patterns
+  );
+  return layerRes.rows as Array<{ id: string; name: string; created_at: string | null }>;
+}
+
+function buildQueryForLayerIds(args: {
+  layerIds: string[];
+  plan: Plan;
+  rawQuery: string;
+  availableFields: string[];
+}) {
+  const { layerIds, plan, rawQuery, availableFields } = args;
+
+  const hasFilters =
+    (Array.isArray(plan.filters) && plan.filters.length > 0) ||
+    (Array.isArray(plan.anyOf) && plan.anyOf.length > 0);
+
+  const effectivePlan: Plan = {
+    ...plan,
+    filters: Array.isArray(plan.filters) ? [...plan.filters] : [],
+    anyOf: Array.isArray(plan.anyOf) ? plan.anyOf : undefined,
+    limit: Number.isFinite(Number(plan.limit)) ? Number(plan.limit) : 200,
+  };
+
+  // SMART widening
+  if (
+    rawQuery &&
+    !effectivePlan.aggregate &&
+    Array.isArray(effectivePlan.filters) &&
+    effectivePlan.filters.length === 1 &&
+    (!Array.isArray(effectivePlan.anyOf) || effectivePlan.anyOf.length === 0)
+  ) {
+    const only = effectivePlan.filters[0];
+    const isSingleTextIlike =
+      only?.op === "ilike" &&
+      typeof only?.value === "string" &&
+      canonicalFieldName(only?.field) !== "__KEYWORD";
+
+    if (isSingleTextIlike && !isStructuredFieldName(String(only.field))) {
+      const tokens = tokenizeMeaningful(rawQuery);
+      if (tokens.length) {
+        effectivePlan.filters = tokens.map((t) => ({ field: "__keyword", op: "ilike", value: t }));
+      }
+    }
+  }
+
+  if (!hasFilters && rawQuery) {
+    const groups = parseQueryGroups(rawQuery);
+
+    if (groups.length > 1) {
+      effectivePlan.anyOf = groups.map((tokens) =>
+        tokens.map((t) => ({ field: "__keyword", op: "ilike" as Op, value: t }))
+      );
+    } else {
+      const tokens = groups.length === 1 ? groups[0] : tokenizeMeaningful(rawQuery);
+      for (const t of tokens) {
+        effectivePlan.filters.push({ field: "__keyword", op: "ilike", value: t });
+      }
+    }
+
+    if (/\bshow\s+all\b/i.test(normalizeValue(rawQuery))) {
+      effectivePlan.limit = 2000;
+    }
+  }
+
+  const clauses: string[] = [`layer_id = ANY($1)`];
+  const params: any[] = [layerIds];
+  let p = 2;
+
+  for (const f of effectivePlan.filters || []) {
+    const built = buildFilterClauseDynamic(f, p, availableFields);
+    if (!built) continue;
+    clauses.push(built.clauseSql);
+    params.push(...built.params);
+    p = built.next;
+  }
+
+  if (Array.isArray(effectivePlan.anyOf) && effectivePlan.anyOf.length > 0) {
+    const orGroups: string[] = [];
+
+    for (const group of effectivePlan.anyOf) {
+      const groupClauses: string[] = [];
+      let gp = p;
+      const gpParams: any[] = [];
+
+      for (const f of group || []) {
+        const built = buildFilterClauseDynamic(f, gp, availableFields);
+        if (!built) continue;
+        groupClauses.push(built.clauseSql);
+        gpParams.push(...built.params);
+        gp = built.next;
+      }
+
+      if (groupClauses.length > 0) {
+        orGroups.push(`(${groupClauses.join(" AND ")})`);
+        params.push(...gpParams);
+        p = gp;
+      }
+    }
+
+    if (orGroups.length > 0) clauses.push(`(${orGroups.join(" OR ")})`);
+  }
+
+  const limit = Math.min(Math.max(Number(effectivePlan.limit ?? 200), 0), 2000);
+
+  // ORDER BY
+  let orderSql = "";
+  const orderParams: any[] = [];
+
+  if (effectivePlan.orderBy?.field && limit > 0) {
+    const dir = effectivePlan.orderBy.direction === "desc" ? "DESC" : "ASC";
+
+    if (canonicalFieldName(effectivePlan.orderBy.field) === "__AREA__") {
+      const areaField = pickBestAreaField(availableFields);
+      if (areaField) {
+        orderSql = `ORDER BY (NULLIF(props->>$${p}, '')::double precision) ${dir} NULLS LAST`;
+        orderParams.push(areaField);
+        p += 1;
+      }
+    } else {
+      const candidates = resolveFieldCandidates(effectivePlan.orderBy.field, availableFields);
+      const picked = candidates[0] ?? effectivePlan.orderBy.field;
+
+      orderSql = `ORDER BY ${normalizeTextSql(`(props->>$${p})`)} ${dir} NULLS LAST`;
+      orderParams.push(picked);
+      p += 1;
+    }
+  }
+
+  const sql = `
+    WITH filtered AS (
+      SELECT
+        CASE
+          WHEN geom IS NULL THEN NULL
+          WHEN ST_SRID(geom) = 4326 THEN ST_Force2D(ST_MakeValid(geom))
+          WHEN ST_SRID(geom) = 0 THEN ST_Force2D(ST_MakeValid(ST_SetSRID(geom, 4326)))
+          ELSE ST_Force2D(ST_MakeValid(ST_Transform(geom, 4326)))
+        END AS geom4326,
+        props
+      FROM public.features
+      WHERE ${clauses.join(" AND ")}
+      ${orderSql}
+      LIMIT ${limit}
+    )
+    SELECT jsonb_build_object(
+      'type', 'FeatureCollection',
+      'features', COALESCE(
+        jsonb_agg(
+          jsonb_build_object(
+            'type','Feature',
+            'geometry', CASE
+              WHEN geom4326 IS NULL THEN NULL
+              ELSE ST_AsGeoJSON(geom4326)::jsonb
+            END,
+            'properties', props
+          )
+        ),
+        '[]'::jsonb
+      )
+    ) AS geojson
+    FROM filtered;
+  `;
+
+  return { sql, params: [...params, ...orderParams], effectivePlan, availableFieldsCount: availableFields.length };
+}
+
 /* ---------------- handler ---------------- */
 
 export async function POST(req: Request) {
@@ -419,7 +602,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Missing plan.layerName." }, { status: 400 });
     }
 
-    // support CBFMA + PA + CSC
     let resolvedLayerName: DatasetKey = ["CBFMA", "PA", "CSC"].includes(plan.layerName) ? plan.layerName : "UNKNOWN";
 
     if ((resolvedLayerName === "UNKNOWN" || !resolvedLayerName) && rawQuery) {
@@ -430,199 +612,86 @@ export async function POST(req: Request) {
 
     const patterns = datasetPatterns(resolvedLayerName);
 
-    const layerRes = await pool.query(
-      `
-      SELECT l.id, l.name
-      FROM public.layers l
-      WHERE (${patterns.map((_, i) => `l.name ILIKE $${i + 1}`).join(" OR ")})
-      ORDER BY l.created_at DESC
-      `,
-      patterns
-    );
+    // ✅ get layers from BOTH DBs
+    const [layers1, layers2] = await Promise.all([
+      findMatchingLayers(poolDb1, patterns).catch(() => []),
+      findMatchingLayers(poolDb2, patterns).catch(() => []),
+    ]);
 
-    if (layerRes.rowCount === 0) {
-      return NextResponse.json({ ok: false, error: `No layers matched dataset: ${resolvedLayerName}` }, { status: 404 });
+    if (layers1.length === 0 && layers2.length === 0) {
+      return NextResponse.json(
+        { ok: false, error: `No layers matched dataset: ${resolvedLayerName}` },
+        { status: 404 }
+      );
     }
 
-    const layerIds = layerRes.rows.map((r) => r.id as string);
-    const layerPicked = layerRes.rows.map((r) => r.name as string);
+    // Keep names for debug/UI
+    const layerPicked = [
+      ...layers2.map((r) => r.name), // prefer DB2 (new storage)
+      ...layers1.map((r) => r.name),
+    ];
 
-    const availableFields = await getAvailableFields(layerIds);
+    // ✅ available fields = union(db1, db2) for all matched layers
+    const [fields1, fields2] = await Promise.all([
+      layers1.length ? getAvailableFields(poolDb1, layers1.map((r) => r.id)) : Promise.resolve([]),
+      layers2.length ? getAvailableFields(poolDb2, layers2.map((r) => r.id)) : Promise.resolve([]),
+    ]);
+    const availableFields = Array.from(new Set([...fields1, ...fields2]));
 
-    const hasFilters =
-      (Array.isArray(plan.filters) && plan.filters.length > 0) ||
-      (Array.isArray(plan.anyOf) && plan.anyOf.length > 0);
-
-    const effectivePlan: Plan = {
-      ...plan,
-      layerName: resolvedLayerName,
-      filters: Array.isArray(plan.filters) ? [...plan.filters] : [],
-      anyOf: Array.isArray(plan.anyOf) ? plan.anyOf : undefined,
-      limit: Number.isFinite(Number(plan.limit)) ? Number(plan.limit) : 200,
+    // Run the query per DB (only if it has matching layers)
+    const run1 = async () => {
+      if (!layers1.length) return { geojson: { type: "FeatureCollection", features: [] }, featureCount: 0, nullGeomCount: 0 };
+      const built = buildQueryForLayerIds({
+        layerIds: layers1.map((r) => r.id),
+        plan: { ...plan, layerName: resolvedLayerName },
+        rawQuery,
+        availableFields,
+      });
+      const r = await poolDb1.query(built.sql, built.params);
+      const gj = r.rows?.[0]?.geojson ?? { type: "FeatureCollection", features: [] };
+      const fc = asFeatureCollection(gj);
+      const featureCount = fc.features.length;
+      const nullGeomCount = fc.features.filter((f: any) => !f?.geometry).length;
+      return { geojson: fc, featureCount, nullGeomCount };
     };
 
-    // ✅ SMART WIDENING (SAFE):
-    // Only widen when the single filter is NOT structured (so we don't delete correct CENRO filters).
-    if (
-      rawQuery &&
-      !effectivePlan.aggregate &&
-      Array.isArray(effectivePlan.filters) &&
-      effectivePlan.filters.length === 1 &&
-      (!Array.isArray(effectivePlan.anyOf) || effectivePlan.anyOf.length === 0)
-    ) {
-      const only = effectivePlan.filters[0];
-      const isSingleTextIlike =
-        only?.op === "ilike" &&
-        typeof only?.value === "string" &&
-        canonicalFieldName(only?.field) !== "__KEYWORD";
+    const run2 = async () => {
+      if (!layers2.length) return { geojson: { type: "FeatureCollection", features: [] }, featureCount: 0, nullGeomCount: 0 };
+      const built = buildQueryForLayerIds({
+        layerIds: layers2.map((r) => r.id),
+        plan: { ...plan, layerName: resolvedLayerName },
+        rawQuery,
+        availableFields,
+      });
+      const r = await poolDb2.query(built.sql, built.params);
+      const gj = r.rows?.[0]?.geojson ?? { type: "FeatureCollection", features: [] };
+      const fc = asFeatureCollection(gj);
+      const featureCount = fc.features.length;
+      const nullGeomCount = fc.features.filter((f: any) => !f?.geometry).length;
+      return { geojson: fc, featureCount, nullGeomCount };
+    };
 
-      if (isSingleTextIlike && !isStructuredFieldName(String(only.field))) {
-        const tokens = tokenizeMeaningful(rawQuery);
-        if (tokens.length) {
-          effectivePlan.filters = tokens.map((t) => ({ field: "__keyword", op: "ilike", value: t }));
-        }
-      }
-    }
+    const [a, b] = await Promise.all([run1(), run2()]);
+    const merged = mergeFeatureCollections(a.geojson, b.geojson);
 
-    // If AI gave no filters: build token filters from query
-    if (!hasFilters && rawQuery) {
-      const groups = parseQueryGroups(rawQuery);
-
-      if (groups.length > 1) {
-        effectivePlan.anyOf = groups.map((tokens) =>
-          tokens.map((t) => ({ field: "__keyword", op: "ilike" as Op, value: t }))
-        );
-      } else {
-        const tokens = groups.length === 1 ? groups[0] : tokenizeMeaningful(rawQuery);
-        for (const t of tokens) {
-          effectivePlan.filters.push({ field: "__keyword", op: "ilike", value: t });
-        }
-      }
-
-      if (/\bshow\s+all\b/i.test(normalizeValue(rawQuery))) {
-        effectivePlan.limit = 2000;
-      }
-    }
-
-    const clauses: string[] = [`layer_id = ANY($1)`];
-    const params: any[] = [layerIds];
-    let p = 2;
-
-    for (const f of effectivePlan.filters || []) {
-      const built = buildFilterClauseDynamic(f, p, availableFields);
-      if (!built) continue;
-      clauses.push(built.clauseSql);
-      params.push(...built.params);
-      p = built.next;
-    }
-
-    if (Array.isArray(effectivePlan.anyOf) && effectivePlan.anyOf.length > 0) {
-      const orGroups: string[] = [];
-
-      for (const group of effectivePlan.anyOf) {
-        const groupClauses: string[] = [];
-        let gp = p;
-        const gpParams: any[] = [];
-
-        for (const f of group || []) {
-          const built = buildFilterClauseDynamic(f, gp, availableFields);
-          if (!built) continue;
-          groupClauses.push(built.clauseSql);
-          gpParams.push(...built.params);
-          gp = built.next;
-        }
-
-        if (groupClauses.length > 0) {
-          orGroups.push(`(${groupClauses.join(" AND ")})`);
-          params.push(...gpParams);
-          p = gp;
-        }
-      }
-
-      if (orGroups.length > 0) clauses.push(`(${orGroups.join(" OR ")})`);
-    }
-
-    const limit = Math.min(Math.max(Number(effectivePlan.limit ?? 200), 0), 2000);
-
-    // ORDER BY
-    let orderSql = "";
-    const orderParams: any[] = [];
-
-    if (effectivePlan.orderBy?.field && limit > 0) {
-      const dir = effectivePlan.orderBy.direction === "desc" ? "DESC" : "ASC";
-
-      if (canonicalFieldName(effectivePlan.orderBy.field) === "__AREA__") {
-        const areaField = pickBestAreaField(availableFields);
-        if (areaField) {
-          orderSql = `ORDER BY (NULLIF(props->>$${p}, '')::double precision) ${dir} NULLS LAST`;
-          orderParams.push(areaField);
-          p += 1;
-        }
-      } else {
-        const candidates = resolveFieldCandidates(effectivePlan.orderBy.field, availableFields);
-        const picked = candidates[0] ?? effectivePlan.orderBy.field;
-
-        orderSql = `ORDER BY ${normalizeTextSql(`(props->>$${p})`)} ${dir} NULLS LAST`;
-        orderParams.push(picked);
-        p += 1;
-      }
-    }
-
-    // FEATURES MODE (✅ fix: make geom valid + 2D + 4326 so it will display)
-    const sql = `
-      WITH filtered AS (
-        SELECT
-          CASE
-            WHEN geom IS NULL THEN NULL
-            WHEN ST_SRID(geom) = 4326 THEN ST_Force2D(ST_MakeValid(geom))
-            WHEN ST_SRID(geom) = 0 THEN ST_Force2D(ST_MakeValid(ST_SetSRID(geom, 4326)))
-            ELSE ST_Force2D(ST_MakeValid(ST_Transform(geom, 4326)))
-          END AS geom4326,
-          props
-        FROM public.features
-        WHERE ${clauses.join(" AND ")}
-        ${orderSql}
-        LIMIT ${limit}
-      )
-      SELECT jsonb_build_object(
-        'type', 'FeatureCollection',
-        'features', COALESCE(
-          jsonb_agg(
-            jsonb_build_object(
-              'type','Feature',
-              'geometry', CASE
-                WHEN geom4326 IS NULL THEN NULL
-                ELSE ST_AsGeoJSON(geom4326)::jsonb
-              END,
-              'properties', props
-            )
-          ),
-          '[]'::jsonb
-        )
-      ) AS geojson
-      FROM filtered;
-    `;
-
-    const r = await pool.query(sql, [...params, ...orderParams]);
-    const gj = r.rows?.[0]?.geojson ?? { type: "FeatureCollection", features: [] };
-    const featureCount = Array.isArray(gj?.features) ? gj.features.length : 0;
-
-    const nullGeomCount = Array.isArray(gj?.features)
-      ? gj.features.filter((f: any) => !f?.geometry).length
-      : 0;
+    const featureCount = a.featureCount + b.featureCount;
+    const nullGeomCount = a.nullGeomCount + b.nullGeomCount;
 
     return NextResponse.json({
       ok: true,
       layerPicked,
       stats: { featureCount, nullGeomCount },
-      geojson: gj,
+      geojson: merged,
       debug: {
         rawQueryReceived: rawQuery,
         resolvedLayerName,
         availableFieldsCount: availableFields.length,
-        effectivePlanFilters: effectivePlan.filters,
-        effectivePlanAnyOf: effectivePlan.anyOf,
-        orderBy: effectivePlan.orderBy,
+        db: {
+          db1MatchedLayers: layers1.length,
+          db2MatchedLayers: layers2.length,
+        },
+        // keep these if you want troubleshooting
+        // effectivePlanFilters etc are produced inside buildQueryForLayerIds
       },
     });
   } catch (e: any) {

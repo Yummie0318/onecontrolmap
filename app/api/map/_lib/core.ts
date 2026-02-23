@@ -1,4 +1,5 @@
-import { pool } from "@/lib/db";
+import { poolDb1, poolDb2 } from "@/lib/db";
+import type { Pool } from "pg";
 
 export type DatasetKey = "CBFMA" | "PA" | "CSC" | "NGP" | "SIFMA" | "FIRE" | "UNKNOWN";
 
@@ -76,7 +77,6 @@ export function extractAfterKeyword(cleaned: string, key: string) {
   const after = cleaned.slice(idx + key.length).trim();
   if (!after) return null;
 
-  // Expanded stopwords to support CSC parsing (prevents values from swallowing the next field keyword)
   const stop = after.match(
     /\b(cenro|penro|district|muni_city|municipality|muni|city|barangay|po_alias|pa_alias|alias|acronym|name_of_pa|name|name_csc|csc_number|csc_no|csc|lc_no|psgc|province|region|type|status|tenure|watershed|cont_pers|hold_add|remarks|yr_assess|po)\b/
   );
@@ -93,25 +93,40 @@ export function makeNormalized(dataset: DatasetKey, base: string, flags: IntentF
   return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
-export async function resolveLayerExists(layerName: string) {
-  const r = await pool.query(`select id, name from layers where name = $1 limit 1`, [layerName]);
-  return r.rows[0] ?? null;
+/* ---------------- helpers for DB1+DB2 ---------------- */
+
+async function queryBoth<T = any>(sql: string, params: any[]) {
+  const [r1, r2] = await Promise.all([
+    poolDb1.query(sql, params).catch((e) => ({ rows: [] as T[], rowCount: 0, _err: e })),
+    poolDb2.query(sql, params).catch((e) => ({ rows: [] as T[], rowCount: 0, _err: e })),
+  ]);
+
+  return { r1: r1 as any, r2: r2 as any };
 }
 
-function geojsonBuildSql(tolerance: number) {
-  return `
-    jsonb_build_object(
-      'type','FeatureCollection',
-      'features', coalesce(jsonb_agg(
-        jsonb_build_object(
-          'type','Feature',
-          'id', f.id,
-          'geometry', st_asgeojson(st_simplifypreservetopology(f.geom, ${tolerance}))::jsonb,
-          'properties', f.props
-        )
-      ), '[]'::jsonb)
-    )
-  `.trim();
+function asFeatureCollection(fc: any) {
+  if (!fc || fc.type !== "FeatureCollection" || !Array.isArray(fc.features)) {
+    return { type: "FeatureCollection", features: [] as any[] };
+  }
+  return fc;
+}
+
+function mergeFeatureCollections(a: any, b: any) {
+  const A = asFeatureCollection(a);
+  const B = asFeatureCollection(b);
+
+  // Deduplicate by feature.id
+  const map = new Map<string, any>();
+  for (const f of A.features) map.set(String(f?.id ?? cryptoRandomKey()), f);
+  for (const f of B.features) map.set(String(f?.id ?? cryptoRandomKey()), f);
+
+  return { type: "FeatureCollection", features: Array.from(map.values()) };
+}
+
+// fallback ID if somehow missing
+function cryptoRandomKey() {
+  // Avoid importing crypto in edge cases; use timestamp+rand
+  return `tmp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 /** safe numeric parse for smallest/largest ordering */
@@ -146,8 +161,34 @@ function keywordMatchSql() {
   `.trim();
 }
 
+function geojsonBuildSql(tolerance: number) {
+  return `
+    jsonb_build_object(
+      'type','FeatureCollection',
+      'features', coalesce(jsonb_agg(
+        jsonb_build_object(
+          'type','Feature',
+          'id', f.id,
+          'geometry', st_asgeojson(st_simplifypreservetopology(f.geom, ${tolerance}))::jsonb,
+          'properties', f.props
+        )
+      ), '[]'::jsonb)
+    )
+  `.trim();
+}
+
+/* ---------------- layer resolution across both DBs ---------------- */
+
+export async function resolveLayerExists(layerName: string) {
+  const sql = `select id, name from layers where name = $1 limit 1`;
+  const { r1, r2 } = await queryBoth(sql, [layerName]);
+
+  // Prefer DB2 if both exist (new storage)
+  return r2.rows?.[0] ?? r1.rows?.[0] ?? null;
+}
+
 /**
- * Shared DB search runner.
+ * Shared DB search runner (DB1 + DB2 merged).
  * - parsed.field is validated by you in each dataset parser (whitelist!)
  */
 export async function searchDatasetGeoJSON(args: {
@@ -175,8 +216,10 @@ export async function searchDatasetGeoJSON(args: {
       ? `ORDER BY ${areaOrderExprSql()} DESC NULLS LAST`
       : "";
 
-  // NOTE: you can pass extraWhereSql from dataset modules (ex: renewal)
   const extraWhere = args.extraWhereSql ? `\n${args.extraWhereSql}\n` : "\n";
+
+  // When smallest/largest is requested, we also return an "area" so we can compare DB1 vs DB2 results.
+  const areaSelect = wantsSmall || wantsLarge ? `, ${areaOrderExprSql()} as __area` : "";
 
   if (parsed.mode === "layer") {
     const layer = await resolveLayerExists(parsed.layerName);
@@ -191,11 +234,10 @@ export async function searchDatasetGeoJSON(args: {
       });
     }
 
-    const r = await pool.query(
-      `
-      select ${geojsonBuildSql(tol)} as geojson
+    const sql = `
+      select ${geojsonBuildSql(tol)} as geojson ${wantsSmall || wantsLarge ? ", min(__area) as best_area" : ""}
       from (
-        select f.id, f.geom, f.props
+        select f.id, f.geom, f.props ${areaSelect}
         from features f
         join layers l on l.id = f.layer_id
         where l.name = $1
@@ -203,23 +245,38 @@ export async function searchDatasetGeoJSON(args: {
         ${orderBy}
         limit $2
       ) f
-      `,
-      [layer.name, finalLimit]
-    );
+    `;
+
+    const { r1, r2 } = await queryBoth(sql, [layer.name, finalLimit]);
+
+    // Merge normal results
+    if (!(wantsSmall || wantsLarge)) {
+      const merged = mergeFeatureCollections(r1.rows?.[0]?.geojson, r2.rows?.[0]?.geojson);
+      return { mode: "layer" as const, layer: layer.name, geojson: merged };
+    }
+
+    // For smallest/largest, choose the winner among DB1/DB2 based on best_area
+    const a1 = Number(r1.rows?.[0]?.best_area ?? NaN);
+    const a2 = Number(r2.rows?.[0]?.best_area ?? NaN);
+
+    const pickDb2 =
+      Number.isFinite(a2) &&
+      (!Number.isFinite(a1) || (wantsSmall ? a2 <= a1 : a2 >= a1));
+
+    const chosen = pickDb2 ? r2.rows?.[0]?.geojson : r1.rows?.[0]?.geojson;
 
     return {
       mode: "layer" as const,
       layer: layer.name,
-      geojson: r.rows[0]?.geojson ?? { type: "FeatureCollection", features: [] },
+      geojson: asFeatureCollection(chosen),
     };
   }
 
   if (parsed.mode === "field") {
-    const r = await pool.query(
-      `
-      select ${geojsonBuildSql(tol)} as geojson
+    const sql = `
+      select ${geojsonBuildSql(tol)} as geojson ${wantsSmall || wantsLarge ? ", min(__area) as best_area" : ""}
       from (
-        select f.id, f.geom, f.props
+        select f.id, f.geom, f.props ${areaSelect}
         from features f
         join layers l on l.id = f.layer_id
         where split_part(l.name,'_',1) = $1
@@ -228,22 +285,32 @@ export async function searchDatasetGeoJSON(args: {
         ${orderBy}
         limit $4
       ) f
-      `,
-      [dataset, parsed.field, parsed.value, finalLimit]
-    );
+    `;
 
-    return {
-      mode: "field" as const,
-      filter: parsed,
-      geojson: r.rows[0]?.geojson ?? { type: "FeatureCollection", features: [] },
-    };
+    const { r1, r2 } = await queryBoth(sql, [dataset, parsed.field, parsed.value, finalLimit]);
+
+    if (!(wantsSmall || wantsLarge)) {
+      const merged = mergeFeatureCollections(r1.rows?.[0]?.geojson, r2.rows?.[0]?.geojson);
+      return { mode: "field" as const, filter: parsed, geojson: merged };
+    }
+
+    const a1 = Number(r1.rows?.[0]?.best_area ?? NaN);
+    const a2 = Number(r2.rows?.[0]?.best_area ?? NaN);
+
+    const pickDb2 =
+      Number.isFinite(a2) &&
+      (!Number.isFinite(a1) || (wantsSmall ? a2 <= a1 : a2 >= a1));
+
+    const chosen = pickDb2 ? r2.rows?.[0]?.geojson : r1.rows?.[0]?.geojson;
+
+    return { mode: "field" as const, filter: parsed, geojson: asFeatureCollection(chosen) };
   }
 
-  const r = await pool.query(
-    `
-    select ${geojsonBuildSql(tol)} as geojson
+  // keyword mode
+  const sql = `
+    select ${geojsonBuildSql(tol)} as geojson ${wantsSmall || wantsLarge ? ", min(__area) as best_area" : ""}
     from (
-      select f.id, f.geom, f.props
+      select f.id, f.geom, f.props ${areaSelect}
       from features f
       join layers l on l.id = f.layer_id
       where split_part(l.name,'_',1) = $1
@@ -252,13 +319,23 @@ export async function searchDatasetGeoJSON(args: {
       ${orderBy}
       limit $3
     ) f
-    `,
-    [dataset, parsed.keyword, finalLimit]
-  );
+  `;
 
-  return {
-    mode: "keyword" as const,
-    keyword: parsed.keyword,
-    geojson: r.rows[0]?.geojson ?? { type: "FeatureCollection", features: [] },
-  };
+  const { r1, r2 } = await queryBoth(sql, [dataset, parsed.keyword, finalLimit]);
+
+  if (!(wantsSmall || wantsLarge)) {
+    const merged = mergeFeatureCollections(r1.rows?.[0]?.geojson, r2.rows?.[0]?.geojson);
+    return { mode: "keyword" as const, keyword: parsed.keyword, geojson: merged };
+  }
+
+  const a1 = Number(r1.rows?.[0]?.best_area ?? NaN);
+  const a2 = Number(r2.rows?.[0]?.best_area ?? NaN);
+
+  const pickDb2 =
+    Number.isFinite(a2) &&
+    (!Number.isFinite(a1) || (wantsSmall ? a2 <= a1 : a2 >= a1));
+
+  const chosen = pickDb2 ? r2.rows?.[0]?.geojson : r1.rows?.[0]?.geojson;
+
+  return { mode: "keyword" as const, keyword: parsed.keyword, geojson: asFeatureCollection(chosen) };
 }

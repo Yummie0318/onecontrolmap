@@ -1,6 +1,6 @@
-// C:\Users\Yummie03\Desktop\onemap\app\api\layers\[id]\attributes\route.ts
+// app/api/layers/[id]/attributes/route.ts
 import { NextResponse } from "next/server";
-import { pool } from "@/lib/db";
+import { poolDb1, poolDb2 } from "@/lib/db";
 
 function toInt(v: string | null, fallback: number) {
   const n = Number(v);
@@ -10,6 +10,27 @@ function toInt(v: string | null, fallback: number) {
 function escapeLike(s: string) {
   // Escape % and _ and backslash for LIKE/ILIKE
   return s.replace(/[%_\\]/g, (m) => "\\" + m);
+}
+
+async function pickDbByLayerId(layerId: string) {
+  // returns { db: "db1"|"db2", pool } if layer exists
+  const c1 = await poolDb1.connect();
+  try {
+    const r1 = await c1.query(`SELECT 1 FROM public.layers WHERE id = $1 LIMIT 1`, [layerId]);
+    if (r1.rowCount) return { db: "db1" as const, pool: poolDb1 };
+  } finally {
+    c1.release();
+  }
+
+  const c2 = await poolDb2.connect();
+  try {
+    const r2 = await c2.query(`SELECT 1 FROM public.layers WHERE id = $1 LIMIT 1`, [layerId]);
+    if (r2.rowCount) return { db: "db2" as const, pool: poolDb2 };
+  } finally {
+    c2.release();
+  }
+
+  return null;
 }
 
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -22,7 +43,13 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
 
   const offset = (page - 1) * pageSize;
 
-  const client = await pool.connect();
+  // ✅ choose which DB this layer belongs to
+  const picked = await pickDbByLayerId(layerId);
+  if (!picked) {
+    return NextResponse.json({ ok: false, error: "Layer not found." }, { status: 404 });
+  }
+
+  const client = await picked.pool.connect();
   try {
     // WHERE
     let whereSql = `WHERE f.layer_id = $1`;
@@ -46,8 +73,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     const total = totalRes.rows?.[0]?.total ?? 0;
 
     // PAGE ROWS
-    // ✅ return stable __fid + flattened props
-    // We order by id for stable pagination.
     const pageParams = [...params, pageSize, offset];
     const rowsRes = await client.query(
       `
@@ -82,6 +107,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       search: searchRaw,
       columns,
       rows,
+      db: picked.db, // helpful for debugging
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message ?? "Failed" }, { status: 500 });
