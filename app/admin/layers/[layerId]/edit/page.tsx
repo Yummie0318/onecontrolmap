@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import AutoLogout from "@/app/components/AutoLogout";
 
 type Row = {
@@ -54,18 +54,22 @@ function isValidFieldName(name: string) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
 }
 
+// sentinel for staged "delete property"
+const DELETE_PROP = "__DELETE_PROP__";
+
 // ---------- tiny inline icons (no deps) ----------
 function Icon({
   name,
   size = 16,
 }: {
   name:
+    | "back"
     | "search"
     | "filter"
     | "clear"
     | "reload"
     | "save"
-    | "trash"
+    | "delete"
     | "apply"
     | "first"
     | "prev"
@@ -75,7 +79,11 @@ function Icon({
     | "lock"
     | "chevUp"
     | "chevDown"
-    | "sliders";
+    | "sliders"
+    | "undo"
+    | "colDelete"
+    | "dots"
+    | "caretDown";
   size?: number;
 }) {
   const common = {
@@ -92,6 +100,13 @@ function Icon({
     strokeLinejoin: "round" as const,
   };
   switch (name) {
+    case "back":
+      return (
+        <svg {...common}>
+          <path {...stroke} d="M15 18l-6-6 6-6" />
+          <path {...stroke} d="M9 12h12" />
+        </svg>
+      );
     case "search":
       return (
         <svg {...common}>
@@ -129,7 +144,7 @@ function Icon({
           <path {...stroke} d="M7 3v5h8" />
         </svg>
       );
-    case "trash":
+    case "delete":
       return (
         <svg {...common}>
           <path {...stroke} d="M3 6h18" />
@@ -213,6 +228,36 @@ function Icon({
           <path {...stroke} d="M18 16h4" />
         </svg>
       );
+    case "undo":
+      return (
+        <svg {...common}>
+          <path {...stroke} d="M9 14l-4-4 4-4" />
+          <path {...stroke} d="M5 10h9a6 6 0 1 1 0 12h-1" />
+        </svg>
+      );
+    case "colDelete":
+      return (
+        <svg {...common}>
+          <path {...stroke} d="M4 5h16" />
+          <path {...stroke} d="M10 5V3h4v2" />
+          <path {...stroke} d="M8 8h8" />
+          <path {...stroke} d="M19 6l-1 14H6L5 6" />
+          <path {...stroke} d="M10 11v6" />
+          <path {...stroke} d="M14 11v6" />
+        </svg>
+      );
+    case "dots":
+      return (
+        <svg {...common}>
+          <path {...stroke} d="M5 12h.01M12 12h.01M19 12h.01" />
+        </svg>
+      );
+    case "caretDown":
+      return (
+        <svg {...common}>
+          <path {...stroke} d="M6 9l6 6 6-6" />
+        </svg>
+      );
   }
 }
 
@@ -259,14 +304,18 @@ export default function LayerEditPage() {
   const params = useParams<{ layerId: string }>();
   const layerId = params.layerId;
 
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [authName, setAuthName] = useState("Guest User");
+
   const sp = useSearchParams();
-const nameFromUrl = sp.get("name") || "";
+  const nameFromUrl = sp.get("name") || "";
 
   const [layerName, setLayerName] = useState<string>("");
 
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const [err, setErr] = useState("");
 
@@ -305,8 +354,37 @@ const nameFromUrl = sp.get("name") || "";
     return n;
   }, [pending]);
 
-  // 🔒 lock everything while saving/loading
-  const uiLocked = saving || loading;
+  // 🔒 lock everything while saving/loading/deleting
+  const uiLocked = saving || loading || deleting;
+
+  const router = useRouter();
+
+  const hasUnsaved = pendingCount > 0 || !!editing; // unsaved staged edits OR currently editing a cell
+
+  function confirmCloseIfDirty() {
+    if (!hasUnsaved) return true;
+    return window.confirm("You have unsaved changes. If you close this tab, your changes will be lost. Continue?");
+  }
+
+  function goBack() {
+    if (uiLocked) return;
+  
+    // if currently editing, commit it first (so it becomes a pending edit)
+    if (editing) commitEdit();
+  
+    if (!confirmCloseIfDirty()) return;
+  
+    if (typeof window !== "undefined") {
+      // try close tab (works only if opened via window.open)
+      window.close();
+  
+      // fallback if browser blocks close
+      window.setTimeout(() => {
+        if (window.history.length > 1) router.back();
+        else router.push("/viewmap");
+      }, 50);
+    }
+  }
 
   // ✅ mobile: controls as a bottom sheet to give table more height
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
@@ -315,7 +393,9 @@ const nameFromUrl = sp.get("name") || "";
   const columns = useMemo(() => {
     const set = new Set<string>();
     for (const r of rows) for (const k of Object.keys(r.props || {})) if (k !== "__fid") set.add(k);
-    for (const fid of Object.keys(pending)) for (const k of Object.keys(pending[fid] || {})) if (k !== "__fid") set.add(k);
+    for (const fid of Object.keys(pending))
+      for (const k of Object.keys(pending[fid] || {}))
+        if (k !== "__fid") set.add(k);
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [rows, pending]);
 
@@ -332,7 +412,8 @@ const nameFromUrl = sp.get("name") || "";
       const p = pending[r.__fid];
       if (p) {
         for (const [k, v] of Object.entries(p)) {
-          if (`${k}:${stringifyCell(v)}`.toLowerCase().includes(qq)) return true;
+          const disp = v === DELETE_PROP ? "" : v;
+          if (`${k}:${stringifyCell(disp)}`.toLowerCase().includes(qq)) return true;
         }
       }
       return false;
@@ -341,7 +422,10 @@ const nameFromUrl = sp.get("name") || "";
 
   const filteredFids = useMemo(() => filteredRows.map((r) => r.__fid), [filteredRows]);
 
-  const pageCount = useMemo(() => Math.max(1, Math.ceil(filteredRows.length / Math.max(1, pageSize))), [filteredRows.length, pageSize]);
+  const pageCount = useMemo(
+    () => Math.max(1, Math.ceil(filteredRows.length / Math.max(1, pageSize))),
+    [filteredRows.length, pageSize]
+  );
   const pageSafe = useMemo(() => Math.min(Math.max(1, page), pageCount), [page, pageCount]);
 
   const pagedRows = useMemo(() => {
@@ -376,30 +460,32 @@ const nameFromUrl = sp.get("name") || "";
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layerId, nameFromUrl]);
 
-
-
   useEffect(() => {
     try {
       const loggedIn = localStorage.getItem("is_logged_in") === "1";
       const userRaw = localStorage.getItem("auth_user");
+
+      try {
+        const u = userRaw ? JSON.parse(userRaw) : null;
+        const nm = u?.name || u?.full_name || u?.username || "Guest User";
+        setAuthName(String(nm));
+      } catch {
+        setAuthName("Guest User");
+      }
+
       const loginTime = Number(localStorage.getItem("login_time") || "0");
-  
+
       if (!loggedIn || !userRaw || !loginTime) {
         window.location.href = "/login";
         return;
       }
-  
-      // also ensure not expired
-      const age = Date.now() - loginTime;
-      if (age >= 5 * 60 * 1000) {
-        window.location.href = "/login?reason=expired";
-        return;
-      }
+
+      const last = Number(localStorage.getItem("last_activity") || "0");
+      if (!last) localStorage.setItem("last_activity", String(Date.now()));
     } catch {
       window.location.href = "/login";
     }
   }, []);
-
 
   useEffect(() => {
     if (!pickAllRef.current) return;
@@ -407,12 +493,15 @@ const nameFromUrl = sp.get("name") || "";
   }, [allFilteredSelected, someFilteredSelected]);
 
   function getDisplayValue(fid: string, base: any, col: string) {
-    if (pending?.[fid] && Object.prototype.hasOwnProperty.call(pending[fid], col)) return pending[fid][col];
+    if (pending?.[fid] && Object.prototype.hasOwnProperty.call(pending[fid], col)) {
+      const v = pending[fid][col];
+      return v === DELETE_PROP ? "" : v;
+    }
     return base;
   }
 
   async function load() {
-    if (saving) return;
+    if (saving || deleting) return;
     setLoading(true);
     setErr("");
     try {
@@ -424,8 +513,8 @@ const nameFromUrl = sp.get("name") || "";
       const fc = j?.geojson ?? j?.data ?? j?.result ?? j?.fc ?? j;
       if (!fc || fc.type !== "FeatureCollection") throw new Error("API did not return a GeoJSON FeatureCollection");
 
-   const apiName = (j?.layer?.name ?? "").trim();
-if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
+      const apiName = (j?.layer?.name ?? "").trim();
+      if (apiName) setLayerName(apiName);
 
       const feats: any[] = Array.isArray(fc.features) ? fc.features : [];
       const rws: Row[] = feats.map((f, idx) => {
@@ -489,6 +578,14 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
       .map(([k]) => k);
   }
 
+  function scopeText(scope: "selected" | "filtered" | "all") {
+    if (scope === "selected") return "Selected rows";
+    if (scope === "filtered") return "Filtered rows";
+    return "All rows";
+  }
+
+  const deleteTargets = useMemo(() => getTargets(), [applyScope, rows, filteredFids, selectedSet]);
+
   // ---------- Inline cell edit ----------
   function startEdit(fid: string, col: string, current: any) {
     if (uiLocked) return;
@@ -529,6 +626,98 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
     }
   }
 
+  // ✅ "Delete column" moved into the column dropdown arrow (menu)
+  const [colMenuOpen, setColMenuOpen] = useState(false);
+  const colMenuBtnRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!colMenuOpen) return;
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if (colMenuBtnRef.current && colMenuBtnRef.current.contains(t)) return;
+      const menu = document.getElementById("colMenuPopover");
+      if (menu && menu.contains(t)) return;
+      setColMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [colMenuOpen]);
+
+  useEffect(() => {
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      // don't block while saving/deleting/loading
+      if (uiLocked) return;
+  
+      // warn only if there are unsaved changes
+      if (pendingCount > 0 || !!editing) {
+        e.preventDefault();
+        e.returnValue = ""; // required for Chrome
+        return "";
+      }
+    }
+  
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [pendingCount, editing, uiLocked]);
+
+  function getTargetsForColumnDelete(): string[] {
+    if (applyScope === "all") return rows.map((r) => r.__fid);
+    if (applyScope === "filtered") return filteredFids;
+  
+    // selected scope:
+    const selected = Object.entries(selectedSet)
+      .filter(([, v]) => v)
+      .map(([fid]) => fid);
+  
+    // ✅ fallback: if nothing selected, delete column on filtered if filtering exists, else all
+    if (selected.length > 0) return selected;
+    if (filteredFids.length > 0) return filteredFids;
+    return rows.map((r) => r.__fid);
+  }
+  
+  function stageDeleteColumn(field: string) {
+    if (uiLocked) return;
+  
+    const f = field.trim();
+    if (!f) {
+      showToast("info", "Choose a column first.");
+      return;
+    }
+    if (!isValidFieldName(f)) {
+      showToast("error", "Invalid column name.");
+      return;
+    }
+  
+    const targets = getTargetsForColumnDelete();
+    if (targets.length === 0) {
+      showToast("info", "No rows to apply this on.");
+      return;
+    }
+  
+    const inferredScope =
+      applyScope === "selected" && Object.values(selectedSet).filter(Boolean).length === 0
+        ? (q.trim() ? "Filtered rows" : "All rows")
+        : scopeText(applyScope);
+  
+    const ok = confirm(
+      `Delete column "${f}" from ${inferredScope}?\n\nThis removes the field (property key) from target rows.`
+    );
+    if (!ok) return;
+  
+    setPending((prev) => {
+      const next = { ...prev };
+      for (const fid of targets) {
+        const byFid = { ...(next[fid] || {}) };
+        byFid[f] = DELETE_PROP;
+        next[fid] = byFid;
+      }
+      return next;
+    });
+  
+    showToast("success", `Staged delete of "${f}" for ${targets.length} row(s).`);
+  }
+
   // ---------- Field calculator (stage edits) ----------
   function applyStage() {
     if (uiLocked) return;
@@ -539,9 +728,38 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
       return;
     }
 
-    const field = (calcMode === "add" ? newCol : activeCol).trim();
+    // UPDATE MODE (value update only — delete is now in column dropdown arrow menu)
+    if (calcMode === "update") {
+      const field = activeCol.trim();
+      if (!field) {
+        showToast("info", "Choose a column.");
+        return;
+      }
+
+      if (!isValidFieldName(field)) {
+        showToast("error", "Invalid column name. Use letters/numbers/underscore only.");
+        return;
+      }
+
+      const val = parseValueSmart(newValue);
+      setPending((prev) => {
+        const next = { ...prev };
+        for (const fid of targets) {
+          const byFid = { ...(next[fid] || {}) };
+          byFid[field] = val;
+          next[fid] = byFid;
+        }
+        return next;
+      });
+
+      showToast("success", `Staged ${targets.size} row(s).`);
+      return;
+    }
+
+    // ADD MODE
+    const field = newCol.trim();
     if (!field) {
-      showToast("info", "Choose a column.");
+      showToast("info", "Enter a new column name.");
       return;
     }
 
@@ -578,10 +796,20 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
     if (uiLocked) return;
     if (pendingCount === 0) return;
 
+    // group deletes: field -> fids
+    const deletes = new Map<string, string[]>();
+
+    // group updates: field -> valueKey -> { value, fids }
     const fieldMap = new Map<string, Map<string, { value: any; fids: string[] }>>();
 
     for (const [fid, changes] of Object.entries(pending)) {
       for (const [field, value] of Object.entries(changes || {})) {
+        if (value === DELETE_PROP) {
+          if (!deletes.has(field)) deletes.set(field, []);
+          deletes.get(field)!.push(fid);
+          continue;
+        }
+
         const valueKey = JSON.stringify(value);
         if (!fieldMap.has(field)) fieldMap.set(field, new Map());
         const vmap = fieldMap.get(field)!;
@@ -592,7 +820,25 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
 
     setSaving(true);
     setErr("");
+
     try {
+      // A) apply deletes first
+      for (const [field, fids] of deletes.entries()) {
+        const r = await fetch(`/api/layers/${layerId}/features/bulk`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fids,
+            remove_properties: [field], // backend must support this
+          }),
+        });
+
+        const text = await r.text();
+        const j: any = safeJsonParse(text);
+        if (!j?.ok) throw new Error(j?.error || `Delete column failed for ${field}`);
+      }
+
+      // B) apply updates
       for (const [field, vmap] of fieldMap.entries()) {
         for (const { value, fids } of vmap.values()) {
           const r = await fetch(`/api/layers/${layerId}/features/bulk`, {
@@ -621,15 +867,57 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
     }
   }
 
+  // ✅ DELETE rows (scope-based)
+  async function deleteFids(fids: string[], scopeLabel?: string) {
+    if (uiLocked) return;
+    if (!fids.length) return;
+
+    const label = scopeLabel ? ` (${scopeLabel})` : "";
+    const ok = confirm(`Delete ${fids.length} record(s)${label}?\nThis cannot be undone.`);
+    if (!ok) return;
+
+    setDeleting(true);
+    setErr("");
+    try {
+      const r = await fetch(`/api/layers/${layerId}/features/bulk`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fids, confirm: true }),
+      });
+
+      const text = await r.text();
+      const j: any = safeJsonParse(text);
+      if (!j?.ok) throw new Error(j?.error || "Delete failed");
+
+      setSelectedSet((prev) => {
+        const next = { ...prev };
+        for (const fid of fids) delete next[fid];
+        return next;
+      });
+      setPending((prev) => {
+        const next = { ...prev };
+        for (const fid of fids) delete next[fid];
+        return next;
+      });
+
+      await load();
+      showToast("success", `Deleted ${fids.length} record(s).`);
+    } catch (e: any) {
+      setErr(e?.message ?? "Delete failed");
+      showToast("error", e?.message ?? "Delete failed");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <>
       <AutoLogout />
-    <div className="shell" aria-disabled={uiLocked ? "true" : "false"}>
-      <style>{`
+      <div className="shell" aria-disabled={uiLocked ? "true" : "false"}>
+        <style>{`
         :root{
           --bg0:#ffffff;
           --bg1:#f6f8fb;
-          --panel:#ffffff;
           --text:#0b1220;
           --muted: rgba(11,18,32,.60);
           --stroke: rgba(11,18,32,.10);
@@ -637,6 +925,7 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
           --shadow: 0 14px 40px rgba(11,18,32,.10);
           --primary:#0f7a3a;
           --danger:#b42318;
+          --warn:#b54708;
         }
         html, body { height:100%; margin:0; }
         body{
@@ -655,10 +944,8 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
         @keyframes popIn { from { transform: translateY(6px) scale(.98); opacity: 0;} to { transform: translateY(0) scale(1); opacity: 1;} }
         @keyframes sheetUp { from { transform: translateY(14px); opacity: 0;} to { transform: translateY(0); opacity: 1;} }
 
-        /* ✅ use dynamic viewport units so mobile Safari doesn't steal height */
         .shell{ height: 100dvh; display:flex; flex-direction:column; }
 
-        /* top bar */
         .topBar{
           padding: 10px 12px;
           border-bottom: 1px solid var(--stroke);
@@ -683,7 +970,7 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
           font-weight: 650;
           margin-top: 4px;
           display:flex;
-          flex-direction:column; /* ✅ layer name on top of layer id */
+          flex-direction:column;
           gap:2px;
         }
         .subLine{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 64vw; }
@@ -737,6 +1024,11 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
           border-color: rgba(180,35,24,.22);
           background: rgba(180,35,24,.06);
           color: rgba(180,35,24,.95);
+        }
+        .iconBtnWarn{
+          border-color: rgba(181,71,8,.24);
+          background: rgba(181,71,8,.06);
+          color: rgba(181,71,8,.95);
         }
 
         .searchWrap{
@@ -823,7 +1115,69 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
         }
         .input{ min-width: 260px; }
 
-        /* ✅ give table maximum height: it will stretch and take remaining space */
+        /* ✅ column selector with "arrow dropdown" menu */
+        .colPickWrap{
+          display:flex;
+          align-items:center;
+          gap:8px;
+          position: relative;
+        }
+        .colArrowBtn{
+          width: 40px;
+          height: 40px;
+          border-radius: 14px;
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.92);
+          display:inline-flex;
+          align-items:center;
+          justify-content:center;
+          cursor:pointer;
+          transition: transform .10s ease, border-color .15s ease, box-shadow .15s ease, background .15s ease;
+        }
+        .colArrowBtn:hover{
+          border-color: var(--stroke2);
+          box-shadow: 0 12px 28px rgba(11,18,32,.10);
+          transform: translateY(-1px);
+        }
+        .colArrowBtn[disabled]{ opacity:.55; cursor:not-allowed; transform:none; box-shadow:none; }
+
+        .popover{
+          position:absolute;
+          top: 46px;
+          right: 0;
+          z-index: 50;
+          min-width: 240px;
+          border-radius: 16px;
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.96);
+          backdrop-filter: blur(12px);
+          box-shadow: 0 18px 60px rgba(11,18,32,.18);
+          overflow:hidden;
+        }
+        .popItem{
+          width: 100%;
+          border: 0;
+          background: transparent;
+          padding: 11px 12px;
+          display:flex;
+          align-items:center;
+          gap:10px;
+          cursor:pointer;
+          font-weight: 800;
+          font-size: 12px;
+          color: rgba(11,18,32,.90);
+          text-align:left;
+        }
+        .popItem:hover{ background: rgba(11,18,32,.05); }
+        .popItemDanger{ color: rgba(180,35,24,.95); }
+        .popItemSub{
+          margin-left:auto;
+          font-weight: 750;
+          font-size: 11px;
+          color: rgba(11,18,32,.55);
+        }
+        .popDivider{ height:1px; background: rgba(11,18,32,.08); }
+
         .tableWrap{
           flex: 1;
           min-height:0;
@@ -885,7 +1239,6 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
           font-weight: 650;
         }
 
-        /* toast */
         .toast{
           position: fixed;
           top: 14px;
@@ -928,7 +1281,6 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
           background: rgba(255,255,255,.72);
         }
 
-        /* saving overlay */
         .overlay{
           position: fixed;
           inset: 0;
@@ -992,37 +1344,25 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
           background: rgba(255,255,255,.72);
         }
 
-        /* ✅ mobile bottom sheet controls */
-        .mobileDock{
-          display:none;
-        }
-        .sheet{
-          display:none;
-        }
-        .sheetBackdrop{
-          display:none;
-        }
+        .mobileDock{ display:none; }
+        .sheet{ display:none; }
+        .sheetBackdrop{ display:none; }
 
-        /* ✅ mobile */
         @media (max-width: 520px){
           .main{ padding: 10px; gap: 10px; }
           .card{ border-radius: 18px; }
           .iconBtn{ width: 38px; height: 38px; border-radius: 13px; }
           .pill{ font-size: 10.5px; padding: 6px 8px; }
 
-          /* Hide heavy bars on mobile to free height */
           .desktopBars{ display:none; }
 
-          /* keep table tall; reserve space for bottom dock */
           .main{ padding-bottom: 88px; }
           .tableWrap{ border-top: 1px solid rgba(11,18,32,.06); }
 
-          /* compact header layout */
           .topBar{ gap:8px; }
           .searchWrap{ width: 100%; min-width: 0; }
           .topActions{ width: 100%; justify-content:flex-start; }
 
-          /* bottom dock */
           .mobileDock{
             display:flex;
             position: fixed;
@@ -1076,7 +1416,6 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
             align-items:center;
           }
 
-          /* sheet */
           .sheetBackdrop{
             display:block;
             position: fixed;
@@ -1148,546 +1487,116 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
         }
       `}</style>
 
-      {saving ? (
-        <OverlaySpinner
-          title="Saving your updates…"
-          subtitle="Please don’t close this page. We’re updating the selected records and refreshing the layer."
-        />
-      ) : null}
-
-      {toast.show ? (
-        <div className="toast" role="status" aria-live="polite">
-          <span className={`dot ${toast.type}`} />
-          <div style={{ lineHeight: 1.2 }}>{toast.message}</div>
-        </div>
-      ) : null}
-
-      <div className="topBar">
-        <div className="title">
-          <div>GIS Attribute Editor</div>
-
-          {/* ✅ layer name ABOVE layer id */}
-          <div className="sub">
-            <div className="subLine">Layer: {layerName || "—"}</div>
-            <div className="subLine">{layerId}</div>
-          </div>
-        </div>
-
-        <span className="pill" title="Total rows in this layer">
-          {loading ? (
-            <>
-              <Spinner size={14} /> Loading…
-            </>
-          ) : (
-            `${rows.length} rows`
-          )}
-        </span>
-
-        <span className="pill" title="Selected rows (checkbox)">
-          Selected: {selectedCount}
-        </span>
-
-        <span className="pill" title="Total staged edits not yet saved">
-          Unsaved: {pendingCount}
-        </span>
-
-        <div className="topActions">
-          <div className="searchWrap" title="Search in table values (and staged edits)">
-            <Icon name="search" />
-            <input
-              className="search"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Search table…"
-              disabled={uiLocked}
-            />
-          </div>
-
-          <button
-            className="iconBtn iconBtnPrimary"
-            onClick={selectFiltered}
-            type="button"
-            disabled={uiLocked || filteredFids.length === 0}
-            title="Select all filtered rows"
-            aria-label="Select filtered"
-          >
-            <Icon name="filter" />
-          </button>
-
-          <button
-            className="iconBtn"
-            onClick={clearSelectionOnly}
-            type="button"
-            disabled={uiLocked || selectedCount === 0}
-            title="Clear selection"
-            aria-label="Clear selection"
-          >
-            <Icon name="clear" />
-          </button>
-
-          <button
-            className="iconBtn"
-            onClick={load}
-            type="button"
-            title="Reload from database"
-            aria-label="Reload"
-            disabled={uiLocked}
-          >
-            <Icon name="reload" />
-          </button>
-        </div>
-      </div>
-
-      <div className="main">
-        {err ? <div className="error">⚠ {err}</div> : null}
-
-        <div className="card">
-          {/* ✅ DESKTOP/TABLET BARS (hidden on mobile) */}
-          <div className="desktopBars">
-            {/* FIELD CALCULATOR + Save */}
-            <div className="bar">
-              <div className="pill">Field Calculator</div>
-
-              <select
-                className="select"
-                value={applyScope}
-                onChange={(e) => setApplyScope(e.target.value as any)}
-                title="Where to apply"
-                disabled={uiLocked}
-              >
-                <option value="selected">Apply to selected rows</option>
-                <option value="filtered">Apply to ALL filtered rows</option>
-                <option value="all">Apply to ALL rows</option>
-              </select>
-
-              <select
-                className="select"
-                value={calcMode}
-                onChange={(e) => setCalcMode(e.target.value as any)}
-                title="Mode"
-                disabled={uiLocked}
-              >
-                <option value="update">Update existing column</option>
-                <option value="add">Add new column</option>
-              </select>
-
-              {calcMode === "update" ? (
-                <select
-                  className="select"
-                  value={activeCol}
-                  onChange={(e) => setActiveCol(e.target.value)}
-                  style={{ minWidth: 260 }}
-                  title="Choose column"
-                  disabled={uiLocked}
-                >
-                  <option value="">Choose column…</option>
-                  {columns.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  className="input"
-                  value={newCol}
-                  onChange={(e) => setNewCol(e.target.value)}
-                  placeholder="New column name (e.g. PO_NAME)"
-                  style={{ minWidth: 260 }}
-                  title="New column name"
-                  disabled={uiLocked}
-                />
-              )}
-
-              <input
-                className="input"
-                value={newValue}
-                onChange={(e) => setNewValue(e.target.value)}
-                placeholder='New value (text/123/true/false/null or {"a":1})'
-                style={{ flex: 1, minWidth: 320 }}
-                title="New value"
-                disabled={uiLocked}
-              />
-
-              <div className="barRight">
-                <button
-                  className="iconBtn iconBtnPrimary"
-                  type="button"
-                  onClick={applyStage}
-                  disabled={
-                    uiLocked ||
-                    (applyScope === "selected" && selectedCount === 0) ||
-                    (calcMode === "update" && !activeCol) ||
-                    (calcMode === "add" && !newCol.trim())
-                  }
-                  title="Apply (stage)"
-                  aria-label="Apply (stage)"
-                >
-                  <Icon name="apply" />
-                </button>
-
-                <button
-                  className="iconBtn iconBtnDanger"
-                  type="button"
-                  onClick={discardEdits}
-                  disabled={uiLocked || pendingCount === 0}
-                  title="Discard all unsaved edits"
-                  aria-label="Discard edits"
-                >
-                  <Icon name="trash" />
-                </button>
-
-                <button
-                  className="iconBtn iconBtnDark"
-                  type="button"
-                  onClick={saveChanges}
-                  disabled={uiLocked || pendingCount === 0}
-                  title="Save all staged edits"
-                  aria-label="Save changes"
-                >
-                  {saving ? <Spinner size={16} /> : <Icon name="save" />}
-                </button>
-              </div>
-            </div>
-
-            {/* TABLE BAR */}
-            <div className="bar">
-              <div className="barLeft">
-                <span className="pill">
-                  Showing <b>{filteredRows.length}</b> filtered • Page <b>{pageSafe}</b>/<b>{pageCount}</b>
-                </span>
-
-                <span className="helper" title="Double-click any cell. Enter = commit, Esc = cancel. Click outside to commit too.">
-                  <Icon name="info" size={14} /> Double-click cell to edit
-                </span>
-
-                <button
-                  className="iconBtn"
-                  type="button"
-                  onClick={selectAllOnPage}
-                  disabled={uiLocked || pagedRows.length === 0}
-                  title="Select all rows on this page"
-                  aria-label="Select page"
-                >
-                  <Icon name="filter" />
-                </button>
-              </div>
-
-              <div className="barRight">
-                <button className="iconBtn" type="button" onClick={() => setPage(1)} disabled={uiLocked || pageSafe <= 1} title="First page">
-                  <Icon name="first" />
-                </button>
-                <button
-                  className="iconBtn"
-                  type="button"
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={uiLocked || pageSafe <= 1}
-                  title="Previous page"
-                >
-                  <Icon name="prev" />
-                </button>
-                <button
-                  className="iconBtn"
-                  type="button"
-                  onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
-                  disabled={uiLocked || pageSafe >= pageCount}
-                  title="Next page"
-                >
-                  <Icon name="next" />
-                </button>
-                <button
-                  className="iconBtn"
-                  type="button"
-                  onClick={() => setPage(pageCount)}
-                  disabled={uiLocked || pageSafe >= pageCount}
-                  title="Last page"
-                >
-                  <Icon name="last" />
-                </button>
-
-                <select
-                  className="select"
-                  value={pageSize}
-                  onChange={(e) => setPageSize(Math.max(1, Number(e.target.value) || 100))}
-                  title="Rows per page"
-                  style={{ height: 40 }}
-                  disabled={uiLocked}
-                >
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                  <option value={200}>200</option>
-                  <option value={500}>500</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          {/* TABLE */}
-          <div className="tableWrap" onClick={() => editing && !uiLocked && cancelEdit()} style={{ pointerEvents: saving ? "none" : "auto" }}>
-            <table>
-              <thead>
-                <tr>
-                  <th style={{ width: 60 }}>
-                    <input
-                      ref={pickAllRef}
-                      className="rowChk"
-                      type="checkbox"
-                      checked={allFilteredSelected}
-                      disabled={uiLocked}
-                      onChange={() => {
-                        if (uiLocked) return;
-                        if (filteredFids.length === 0) return;
-                        if (allFilteredSelected) {
-                          setSelectedSet((prev) => {
-                            const next = { ...prev };
-                            for (const fid of filteredFids) delete next[fid];
-                            return next;
-                          });
-                        } else {
-                          setSelectedSet((prev) => {
-                            const next = { ...prev };
-                            for (const fid of filteredFids) next[fid] = true;
-                            return next;
-                          });
-                        }
-                      }}
-                      title="Select all filtered rows (all pages)"
-                      aria-label="Select all filtered rows"
-                    />
-                  </th>
-                  <th style={{ width: 240 }}>__fid</th>
-                  {columns.map((c) => (
-                    <th key={c}>{c}</th>
-                  ))}
-                </tr>
-              </thead>
-
-              <tbody>
-                {pagedRows.map((r) => {
-                  const checked = !!selectedSet[r.__fid];
-                  return (
-                    <tr key={r.__fid} className={checked ? "rowSelected" : ""}>
-                      <td>
-                        <input
-                          className="rowChk"
-                          type="checkbox"
-                          checked={checked}
-                          disabled={uiLocked}
-                          onChange={(e) => toggleRow(r.__fid, e.target.checked)}
-                          aria-label={`Select row ${r.__fid}`}
-                        />
-                      </td>
-
-                      <td style={{ fontWeight: 650 }}>{r.__fid}</td>
-
-                      {columns.map((c) => {
-                        const baseVal = r.props?.[c];
-                        const displayVal = getDisplayValue(r.__fid, baseVal, c);
-
-                        const hasPending = pending?.[r.__fid] && Object.prototype.hasOwnProperty.call(pending[r.__fid], c);
-                        const isEditing = editing?.fid === r.__fid && editing?.col === c;
-
-                        return (
-                          <td
-                            key={c}
-                            className={hasPending ? "cellEdited" : ""}
-                            title={uiLocked ? "Disabled while updating…" : "Double-click to edit"}
-                            onDoubleClick={(e) => {
-                              if (uiLocked) return;
-                              e.stopPropagation();
-                              startEdit(r.__fid, c, displayVal);
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {isEditing ? (
-                              <input
-                                autoFocus
-                                className="cellEditor"
-                                value={editingValue}
-                                onChange={(e) => setEditingValue(e.target.value)}
-                                onKeyDown={onEditorKeyDown}
-                                onBlur={() => commitEdit()}
-                                onClick={(e) => e.stopPropagation()}
-                                disabled={uiLocked}
-                              />
-                            ) : (
-                              stringifyCell(displayVal)
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-
-                {pagedRows.length === 0 ? (
-                  <tr>
-                    <td colSpan={2 + columns.length} style={{ padding: 14, opacity: 0.7, fontWeight: 700 }}>
-                      {loading ? "Loading…" : "No rows found."}
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      {/* ✅ MOBILE DOCK (always visible on phone) */}
-      <div className="mobileDock" aria-hidden={false}>
-        <div className="dockLeft">
-          <button
-            className="iconBtn"
-            type="button"
-            onClick={() => setMobilePanelOpen((v) => !v)}
-            disabled={uiLocked}
-            aria-label="Open controls"
-            title="Controls"
-          >
-            <Icon name="sliders" />
-          </button>
-
-          <div className="dockMeta">
-            <div className="dockLine">
-              Page {pageSafe}/{pageCount} • {filteredRows.length} rows
-            </div>
-            <div className="dockSub">
-              Selected {selectedCount} • Unsaved {pendingCount}
-            </div>
-          </div>
-        </div>
-
-        <div className="dockRight">
-          <button
-            className="iconBtn iconBtnDanger"
-            type="button"
-            onClick={discardEdits}
-            disabled={uiLocked || pendingCount === 0}
-            aria-label="Discard edits"
-            title="Discard edits"
-          >
-            <Icon name="trash" />
-          </button>
-
-          <button
-            className="iconBtn iconBtnDark"
-            type="button"
-            onClick={saveChanges}
-            disabled={uiLocked || pendingCount === 0}
-            aria-label="Save changes"
-            title="Save changes"
-          >
-            {saving ? <Spinner size={16} /> : <Icon name="save" />}
-          </button>
-        </div>
-      </div>
-
-      {/* ✅ MOBILE SHEET (controls) */}
-      {mobilePanelOpen ? (
-        <>
-          <div
-            className="sheetBackdrop"
-            onClick={() => setMobilePanelOpen(false)}
-            role="button"
-            aria-label="Close controls"
-            tabIndex={0}
+        {(saving || deleting) ? (
+          <OverlaySpinner
+            title={saving ? "Saving your updates…" : "Deleting records…"}
+            subtitle={
+              saving
+                ? "Please don’t close this page. We’re updating the selected records and refreshing the layer."
+                : "Please don’t close this page. We’re removing the selected record(s) and refreshing the layer."
+            }
           />
-          <div className="sheet" role="dialog" aria-modal="true" aria-label="Controls">
-            <div className="sheetHead">
-              <div className="sheetTitle">Controls</div>
-              <button className="iconBtn" type="button" onClick={() => setMobilePanelOpen(false)} aria-label="Close">
-                <Icon name="chevDown" />
-              </button>
+        ) : null}
+
+        {toast.show ? (
+          <div className="toast" role="status" aria-live="polite">
+            <span className={`dot ${toast.type}`} />
+            <div style={{ lineHeight: 1.2 }}>{toast.message}</div>
+          </div>
+        ) : null}
+
+        <div className="topBar">
+          <button className="iconBtn" type="button" onClick={goBack} disabled={uiLocked} title="Back" aria-label="Go back">
+            <Icon name="back" />
+          </button>
+
+          <div className="title">
+            <div>GIS Attribute Editor</div>
+            <div className="sub">
+              <div className="subLine">Layer: {layerName || "—"}</div>
+              <div className="subLine">{layerId}</div>
+            </div>
+          </div>
+
+          <span className="pill" title="Total rows in this layer">
+            {loading ? (
+              <>
+                <Spinner size={14} /> Loading…
+              </>
+            ) : (
+              `${rows.length} rows`
+            )}
+          </span>
+
+          <span className="pill" title="Selected rows (checkbox)">
+            Selected: {selectedCount}
+          </span>
+
+          <span className="pill" title="Total staged edits not yet saved">
+            Unsaved: {pendingCount}
+          </span>
+
+          <div className="topActions">
+            <div className="searchWrap" title="Search in table values (and staged edits)">
+              <Icon name="search" />
+              <input className="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search table…" disabled={uiLocked} />
             </div>
 
-            <div className="sheetBody">
-              {/* Quick paging */}
-              <div className="sheetRowTight">
-                <button className="iconBtn" type="button" onClick={() => setPage(1)} disabled={uiLocked || pageSafe <= 1} aria-label="First page">
-                  <Icon name="first" />
-                </button>
-                <button
-                  className="iconBtn"
-                  type="button"
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={uiLocked || pageSafe <= 1}
-                  aria-label="Previous page"
-                >
-                  <Icon name="prev" />
-                </button>
-                <button
-                  className="iconBtn"
-                  type="button"
-                  onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
-                  disabled={uiLocked || pageSafe >= pageCount}
-                  aria-label="Next page"
-                >
-                  <Icon name="next" />
-                </button>
-                <button className="iconBtn" type="button" onClick={() => setPage(pageCount)} disabled={uiLocked || pageSafe >= pageCount} aria-label="Last page">
-                  <Icon name="last" />
-                </button>
+            <button
+              className="iconBtn iconBtnPrimary"
+              onClick={selectFiltered}
+              type="button"
+              disabled={uiLocked || filteredFids.length === 0}
+              title="Select all filtered rows"
+              aria-label="Select filtered"
+            >
+              <Icon name="filter" />
+            </button>
 
-                <select
-                  className="select"
-                  value={pageSize}
-                  onChange={(e) => setPageSize(Math.max(1, Number(e.target.value) || 100))}
-                  disabled={uiLocked}
-                  aria-label="Rows per page"
-                >
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                  <option value={200}>200</option>
-                  <option value={500}>500</option>
+            <button
+              className="iconBtn"
+              onClick={clearSelectionOnly}
+              type="button"
+              disabled={uiLocked || selectedCount === 0}
+              title="Clear selection"
+              aria-label="Clear selection"
+            >
+              <Icon name="clear" />
+            </button>
+
+            <button className="iconBtn" onClick={load} type="button" title="Reload from database" aria-label="Reload" disabled={uiLocked}>
+              <Icon name="reload" />
+            </button>
+          </div>
+        </div>
+
+        <div className="main">
+          {err ? <div className="error">⚠ {err}</div> : null}
+
+          <div className="card">
+            {/* ✅ DESKTOP/TABLET BARS (hidden on mobile) */}
+            <div className="desktopBars">
+              <div className="bar">
+                <select className="select" value={applyScope} onChange={(e) => setApplyScope(e.target.value as any)} title="Where to apply" disabled={uiLocked}>
+                  <option value="selected">Apply to selected rows</option>
+                  <option value="filtered">Apply to ALL filtered rows</option>
+                  <option value="all">Apply to ALL rows</option>
                 </select>
-              </div>
 
-              <div className="sheetRow">
-                <button
-                  className="iconBtn iconBtnPrimary"
-                  onClick={selectFiltered}
-                  type="button"
-                  disabled={uiLocked || filteredFids.length === 0}
-                  aria-label="Select filtered"
-                  title="Select filtered"
-                >
-                  <Icon name="filter" />
-                </button>
+                <select className="select" value={calcMode} onChange={(e) => setCalcMode(e.target.value as any)} title="Mode" disabled={uiLocked}>
+                  <option value="update">Update existing column</option>
+                  <option value="add">Add new column</option>
+                </select>
 
-                <button
-                  className="iconBtn"
-                  onClick={clearSelectionOnly}
-                  type="button"
-                  disabled={uiLocked || selectedCount === 0}
-                  aria-label="Clear selection"
-                  title="Clear selection"
-                >
-                  <Icon name="clear" />
-                </button>
-
-                <button className="iconBtn" onClick={load} type="button" disabled={uiLocked} aria-label="Reload" title="Reload">
-                  <Icon name="reload" />
-                </button>
-              </div>
-
-              {/* Field calculator */}
-              <div className="sheetGrid">
-                <div className="sheetRow">
-                  <select className="select" value={applyScope} onChange={(e) => setApplyScope(e.target.value as any)} disabled={uiLocked}>
-                    <option value="selected">Apply to selected rows</option>
-                    <option value="filtered">Apply to ALL filtered rows</option>
-                    <option value="all">Apply to ALL rows</option>
-                  </select>
-
-                  <select className="select" value={calcMode} onChange={(e) => setCalcMode(e.target.value as any)} disabled={uiLocked}>
-                    <option value="update">Update existing column</option>
-                    <option value="add">Add new column</option>
-                  </select>
-                </div>
-
-                <div className="sheetRow">
-                  {calcMode === "update" ? (
-                    <select className="select" value={activeCol} onChange={(e) => setActiveCol(e.target.value)} disabled={uiLocked}>
+                {calcMode === "update" ? (
+                  <div className="colPickWrap" title="Choose column (use arrow button to delete column)">
+                    <select
+                      className="select"
+                      value={activeCol}
+                      onChange={(e) => setActiveCol(e.target.value)}
+                      style={{ minWidth: 260 }}
+                      disabled={uiLocked}
+                    >
                       <option value="">Choose column…</option>
                       {columns.map((c) => (
                         <option key={c} value={c}>
@@ -1695,26 +1604,78 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
                         </option>
                       ))}
                     </select>
-                  ) : (
-                    <input
-                      className="input"
-                      value={newCol}
-                      onChange={(e) => setNewCol(e.target.value)}
-                      placeholder="New column name (e.g. PO_NAME)"
-                      disabled={uiLocked}
-                    />
-                  )}
 
+                    {/* ✅ Arrow dropdown (menu) that contains Delete Column */}
+                    <button
+                      ref={colMenuBtnRef}
+                      className="colArrowBtn"
+                      type="button"
+                      disabled={uiLocked}
+                      aria-label="Column options"
+                      title="Column options"
+                      onClick={() => setColMenuOpen((v) => !v)}
+                    >
+                      <Icon name="caretDown" />
+                    </button>
+
+                    {colMenuOpen ? (
+                      <div id="colMenuPopover" className="popover" role="menu" aria-label="Column options">
+                        <button
+                          className="popItem popItemDanger"
+                          type="button"
+                          disabled={uiLocked || !activeCol}
+                          onClick={() => {
+                            setColMenuOpen(false);
+                            stageDeleteColumn(activeCol);
+                          }}
+                        >
+                          <Icon name="colDelete" />
+                          Delete this column
+                          <span className="popItemSub">{activeCol ? activeCol : "select a column"}</span>
+                        </button>
+                        <div className="popDivider" />
+                        <button
+                          className="popItem"
+                          type="button"
+                          onClick={() => {
+                            setColMenuOpen(false);
+                            showToast("info", "Tip: Select a column then use the arrow button to delete it.");
+                          }}
+                        >
+                          <Icon name="info" />
+                          How it works
+                          <span className="popItemSub">quick help</span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
                   <input
                     className="input"
-                    value={newValue}
-                    onChange={(e) => setNewValue(e.target.value)}
-                    placeholder='New value (text/123/true/false/null or {"a":1})'
+                    value={newCol}
+                    onChange={(e) => setNewCol(e.target.value)}
+                    placeholder="New column name (e.g. PO_NAME)"
+                    style={{ minWidth: 260 }}
+                    title="New column name"
                     disabled={uiLocked}
                   />
-                </div>
+                )}
 
-                <div className="sheetRow">
+                <input
+                  className="input"
+                  value={newValue}
+                  onChange={(e) => setNewValue(e.target.value)}
+                  placeholder={
+                    calcMode === "update"
+                      ? 'New value (text/123/true/false/null or {"a":1})'
+                      : 'Default value for NEW column (text/123/true/false/null or {"a":1})'
+                  }
+                  style={{ flex: 1, minWidth: 320 }}
+                  title="New value"
+                  disabled={uiLocked}
+                />
+
+                <div className="barRight">
                   <button
                     className="iconBtn iconBtnPrimary"
                     type="button"
@@ -1725,22 +1686,388 @@ if (apiName) setLayerName(apiName); // only overwrite if API actually has a name
                       (calcMode === "update" && !activeCol) ||
                       (calcMode === "add" && !newCol.trim())
                     }
-                    aria-label="Apply (stage)"
                     title="Apply (stage)"
+                    aria-label="Apply (stage)"
                   >
                     <Icon name="apply" />
                   </button>
 
-                  <span className="helper" title="Tip">
-                    <Icon name="info" size={14} /> Double-tap a cell (or zoom) then edit
+                  <button
+                    className="iconBtn iconBtnDanger"
+                    type="button"
+                    onClick={() => deleteFids(deleteTargets, scopeText(applyScope))}
+                    disabled={uiLocked || deleteTargets.length === 0}
+                    title={`Delete ${scopeText(applyScope)}`}
+                    aria-label="Delete rows"
+                  >
+                    <Icon name="delete" />
+                  </button>
+
+                  <button
+                    className="iconBtn iconBtnDanger"
+                    type="button"
+                    onClick={discardEdits}
+                    disabled={uiLocked || pendingCount === 0}
+                    title="Discard all unsaved edits"
+                    aria-label="Discard edits"
+                  >
+                    <Icon name="undo" />
+                  </button>
+
+                  <button
+                    className="iconBtn iconBtnDark"
+                    type="button"
+                    onClick={saveChanges}
+                    disabled={uiLocked || pendingCount === 0}
+                    title="Save all staged edits"
+                    aria-label="Save changes"
+                  >
+                    {saving ? <Spinner size={16} /> : <Icon name="save" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="bar">
+                <div className="barLeft">
+                  <span className="pill">
+                    Showing <b>{filteredRows.length}</b> filtered • Page <b>{pageSafe}</b>/<b>{pageCount}</b>
                   </span>
+
+                  <span className="helper" title="Double-click any cell. Enter = commit, Esc = cancel. Click outside to commit too.">
+                    <Icon name="info" size={14} /> Double-click cell to edit
+                  </span>
+
+                  <button
+                    className="iconBtn"
+                    type="button"
+                    onClick={selectAllOnPage}
+                    disabled={uiLocked || pagedRows.length === 0}
+                    title="Select all rows on this page"
+                    aria-label="Select page"
+                  >
+                    <Icon name="filter" />
+                  </button>
+                </div>
+
+                <div className="barRight">
+                  <button className="iconBtn" type="button" onClick={() => setPage(1)} disabled={uiLocked || pageSafe <= 1} title="First page">
+                    <Icon name="first" />
+                  </button>
+                  <button
+                    className="iconBtn"
+                    type="button"
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={uiLocked || pageSafe <= 1}
+                    title="Previous page"
+                  >
+                    <Icon name="prev" />
+                  </button>
+                  <button
+                    className="iconBtn"
+                    type="button"
+                    onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+                    disabled={uiLocked || pageSafe >= pageCount}
+                    title="Next page"
+                  >
+                    <Icon name="next" />
+                  </button>
+                  <button className="iconBtn" type="button" onClick={() => setPage(pageCount)} disabled={uiLocked || pageSafe >= pageCount} title="Last page">
+                    <Icon name="last" />
+                  </button>
+
+                  <select
+                    className="select"
+                    value={pageSize}
+                    onChange={(e) => setPageSize(Math.max(1, Number(e.target.value) || 100))}
+                    title="Rows per page"
+                    style={{ height: 40 }}
+                    disabled={uiLocked}
+                  >
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={200}>200</option>
+                    <option value={500}>500</option>
+                  </select>
                 </div>
               </div>
             </div>
+
+            <div className="tableWrap" onClick={() => editing && !uiLocked && cancelEdit()} style={{ pointerEvents: uiLocked ? "none" : "auto" }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th style={{ width: 60 }}>
+                      <input
+                        ref={pickAllRef}
+                        className="rowChk"
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        disabled={uiLocked}
+                        onChange={() => {
+                          if (uiLocked) return;
+                          if (filteredFids.length === 0) return;
+                          if (allFilteredSelected) {
+                            setSelectedSet((prev) => {
+                              const next = { ...prev };
+                              for (const fid of filteredFids) delete next[fid];
+                              return next;
+                            });
+                          } else {
+                            setSelectedSet((prev) => {
+                              const next = { ...prev };
+                              for (const fid of filteredFids) next[fid] = true;
+                              return next;
+                            });
+                          }
+                        }}
+                        title="Select all filtered rows (all pages)"
+                        aria-label="Select all filtered rows"
+                      />
+                    </th>
+                    <th style={{ width: 240 }}>__fid</th>
+                    {columns.map((c) => (
+                      <th key={c}>{c}</th>
+                    ))}
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {pagedRows.map((r) => {
+                    const checked = !!selectedSet[r.__fid];
+                    return (
+                      <tr key={r.__fid} className={checked ? "rowSelected" : ""}>
+                        <td>
+                          <input className="rowChk" type="checkbox" checked={checked} disabled={uiLocked} onChange={(e) => toggleRow(r.__fid, e.target.checked)} aria-label={`Select row ${r.__fid}`} />
+                        </td>
+
+                        <td style={{ fontWeight: 650 }}>{r.__fid}</td>
+
+                        {columns.map((c) => {
+                          const baseVal = r.props?.[c];
+                          const displayVal = getDisplayValue(r.__fid, baseVal, c);
+
+                          const hasPending =
+                            pending?.[r.__fid] && Object.prototype.hasOwnProperty.call(pending[r.__fid], c);
+                          const isEditing = editing?.fid === r.__fid && editing?.col === c;
+
+                          return (
+                            <td
+                              key={c}
+                              className={hasPending ? "cellEdited" : ""}
+                              title={uiLocked ? "Disabled while updating…" : "Double-click to edit"}
+                              onDoubleClick={(e) => {
+                                if (uiLocked) return;
+                                e.stopPropagation();
+                                startEdit(r.__fid, c, displayVal);
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {isEditing ? (
+                                <input
+                                  autoFocus
+                                  className="cellEditor"
+                                  value={editingValue}
+                                  onChange={(e) => setEditingValue(e.target.value)}
+                                  onKeyDown={onEditorKeyDown}
+                                  onBlur={() => commitEdit()}
+                                  onClick={(e) => e.stopPropagation()}
+                                  disabled={uiLocked}
+                                />
+                              ) : (
+                                stringifyCell(displayVal)
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+
+                  {pagedRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={2 + columns.length} style={{ padding: 14, opacity: 0.7, fontWeight: 700 }}>
+                        {loading ? "Loading…" : "No rows found."}
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </>
-      ) : null}
-    </div>
+        </div>
+
+        {/* mobile dock stays the same */}
+        <div className="mobileDock" aria-hidden={false}>
+          <div className="dockLeft">
+            <button className="iconBtn" type="button" onClick={() => setMobilePanelOpen((v) => !v)} disabled={uiLocked} aria-label="Open controls" title="Controls">
+              <Icon name="sliders" />
+            </button>
+
+            <div className="dockMeta">
+              <div className="dockLine">
+                Page {pageSafe}/{pageCount} • {filteredRows.length} rows
+              </div>
+              <div className="dockSub">
+                Selected {selectedCount} • Unsaved {pendingCount}
+              </div>
+            </div>
+          </div>
+
+          <div className="dockRight">
+            <button
+              className="iconBtn iconBtnDanger"
+              type="button"
+              onClick={() => deleteFids(deleteTargets, scopeText(applyScope))}
+              disabled={uiLocked || deleteTargets.length === 0}
+              aria-label="Delete"
+              title={`Delete ${scopeText(applyScope)}`}
+            >
+              <Icon name="delete" />
+            </button>
+
+            <button
+              className="iconBtn iconBtnDanger"
+              type="button"
+              onClick={discardEdits}
+              disabled={uiLocked || pendingCount === 0}
+              aria-label="Discard edits"
+              title="Discard edits"
+            >
+              <Icon name="undo" />
+            </button>
+
+            <button className="iconBtn iconBtnDark" type="button" onClick={saveChanges} disabled={uiLocked || pendingCount === 0} aria-label="Save changes" title="Save changes">
+              {saving ? <Spinner size={16} /> : <Icon name="save" />}
+            </button>
+          </div>
+        </div>
+
+        {/* ✅ mobile panel updated too (no separate delete action dropdown) */}
+        {mobilePanelOpen ? (
+          <>
+            <div className="sheetBackdrop" onClick={() => setMobilePanelOpen(false)} role="button" aria-label="Close controls" tabIndex={0} />
+            <div className="sheet" role="dialog" aria-modal="true" aria-label="Controls">
+              <div className="sheetHead">
+                <div className="sheetTitle">Controls</div>
+                <button className="iconBtn" type="button" onClick={() => setMobilePanelOpen(false)} aria-label="Close">
+                  <Icon name="chevDown" />
+                </button>
+              </div>
+
+              <div className="sheetBody">
+                <div className="sheetRowTight">
+                  <button className="iconBtn" type="button" onClick={() => setPage(1)} disabled={uiLocked || pageSafe <= 1} aria-label="First page">
+                    <Icon name="first" />
+                  </button>
+                  <button className="iconBtn" type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={uiLocked || pageSafe <= 1} aria-label="Previous page">
+                    <Icon name="prev" />
+                  </button>
+                  <button className="iconBtn" type="button" onClick={() => setPage((p) => Math.min(pageCount, p + 1))} disabled={uiLocked || pageSafe >= pageCount} aria-label="Next page">
+                    <Icon name="next" />
+                  </button>
+                  <button className="iconBtn" type="button" onClick={() => setPage(pageCount)} disabled={uiLocked || pageSafe >= pageCount} aria-label="Last page">
+                    <Icon name="last" />
+                  </button>
+
+                  <select className="select" value={pageSize} onChange={(e) => setPageSize(Math.max(1, Number(e.target.value) || 100))} disabled={uiLocked} aria-label="Rows per page">
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={200}>200</option>
+                    <option value={500}>500</option>
+                  </select>
+                </div>
+
+                <div className="sheetRow">
+                  <button className="iconBtn iconBtnPrimary" onClick={selectFiltered} type="button" disabled={uiLocked || filteredFids.length === 0} aria-label="Select filtered" title="Select filtered">
+                    <Icon name="filter" />
+                  </button>
+
+                  <button className="iconBtn" onClick={clearSelectionOnly} type="button" disabled={uiLocked || selectedCount === 0} aria-label="Clear selection" title="Clear selection">
+                    <Icon name="clear" />
+                  </button>
+
+                  <button className="iconBtn" onClick={load} type="button" disabled={uiLocked} aria-label="Reload" title="Reload">
+                    <Icon name="reload" />
+                  </button>
+                </div>
+
+                <div className="sheetGrid">
+                  <div className="sheetRow">
+                    <select className="select" value={applyScope} onChange={(e) => setApplyScope(e.target.value as any)} disabled={uiLocked}>
+                      <option value="selected">Apply to selected rows</option>
+                      <option value="filtered">Apply to ALL filtered rows</option>
+                      <option value="all">Apply to ALL rows</option>
+                    </select>
+
+                    <select className="select" value={calcMode} onChange={(e) => setCalcMode(e.target.value as any)} disabled={uiLocked}>
+                      <option value="update">Update existing column</option>
+                      <option value="add">Add new column</option>
+                    </select>
+                  </div>
+
+                  <div className="sheetRow">
+                    {calcMode === "update" ? (
+                      <>
+                        <select className="select" value={activeCol} onChange={(e) => setActiveCol(e.target.value)} disabled={uiLocked}>
+                          <option value="">Choose column…</option>
+                          {columns.map((c) => (
+                            <option key={c} value={c}>
+                              {c}
+                            </option>
+                          ))}
+                        </select>
+
+                        <button
+                          className="iconBtn iconBtnWarn"
+                          type="button"
+                          disabled={uiLocked || !activeCol}
+                          onClick={() => stageDeleteColumn(activeCol)}
+                          aria-label="Delete selected column"
+                          title="Delete selected column"
+                        >
+                          <Icon name="colDelete" />
+                        </button>
+                      </>
+                    ) : (
+                      <input className="input" value={newCol} onChange={(e) => setNewCol(e.target.value)} placeholder="New column name (e.g. PO_NAME)" disabled={uiLocked} />
+                    )}
+
+                    <input
+                      className="input"
+                      value={newValue}
+                      onChange={(e) => setNewValue(e.target.value)}
+                      placeholder={'New value (text/123/true/false/null or {"a":1})'}
+                      disabled={uiLocked}
+                    />
+                  </div>
+
+                  <div className="sheetRow">
+                    <button
+                      className="iconBtn iconBtnPrimary"
+                      type="button"
+                      onClick={applyStage}
+                      disabled={
+                        uiLocked ||
+                        (applyScope === "selected" && selectedCount === 0) ||
+                        (calcMode === "update" && !activeCol) ||
+                        (calcMode === "add" && !newCol.trim())
+                      }
+                      aria-label="Apply (stage)"
+                      title="Apply (stage)"
+                    >
+                      <Icon name="apply" />
+                    </button>
+
+                    <span className="helper" title="Tip">
+                      <Icon name="info" size={14} /> Select column then tap trash to delete
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        ) : null}
+      </div>
     </>
   );
 }

@@ -127,6 +127,48 @@ function hashString(s: string) {
   return (h >>> 0).toString(16);
 }
 
+type ToastState =
+  | { show: false }
+  | { show: true; type: "success" | "error" | "info"; message: string };
+
+function SpinnerDot({ size = 16 }: { size?: number }) {
+  return (
+    <span
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 999,
+        border: "2px solid rgba(11,18,32,.18)",
+        borderTopColor: "rgba(11,18,32,.78)",
+        display: "inline-block",
+        animation: "spin .85s linear infinite",
+      }}
+    />
+  );
+}
+
+function OverlaySpinner({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <div className="overlaySaving" role="alert" aria-live="assertive" aria-busy="true">
+      <div className="overlayCard">
+        <div className="overlayTop">
+          <div className="overlayIcon">
+            <SpinnerDot size={18} />
+          </div>
+          <div className="overlayText">
+            <div className="overlayTitle">{title}</div>
+            {subtitle ? <div className="overlaySub">{subtitle}</div> : null}
+          </div>
+        </div>
+        <div className="overlayHint">
+          <span style={{ fontWeight: 900 }}>ℹ</span>
+          Actions are temporarily disabled to prevent duplicate requests.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ViewMapPage() {
   const [layers, setLayers] = useState<MapLayer[]>([]);
   const layersRef = useRef<MapLayer[]>([]);
@@ -168,6 +210,12 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
 
   const abortersRef = useRef<Record<string, AbortController>>({});
 
+  const [toast, setToast] = useState<ToastState>({ show: false });
+  function showToast(type: "success" | "error" | "info", message: string) {
+    setToast({ show: true, type, message });
+    window.setTimeout(() => setToast({ show: false }), 2200);
+  }
+
   const refreshList = useCallback(async () => {
     setLoadingList(true);
     try {
@@ -175,15 +223,14 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
       const text = await r.text();
       const j: any = safeJsonParse(text);
       if (!j.ok) throw new Error(j.error || "Failed to load layers");
-
+  
       const rows: LayerRow[] = j.layers || [];
-
-      // ✅ keep draw order but remove ids that no longer exist
+  
       setLayerDrawOrder((prev) => {
         const valid = new Set(rows.map((r) => r.id));
         return prev.filter((id) => valid.has(id));
       });
-
+  
       setLayers((prev) => {
         const prevById = new Map(prev.map((p) => [p.id, p]));
         return rows.map((row) => {
@@ -201,6 +248,10 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
           };
         });
       });
+  
+      showToast("info", "Layers refreshed.");
+    } catch (e: any) {
+      showToast("error", e?.message ?? "Failed to load layers");
     } finally {
       setLoadingList(false);
       setBooting(false);
@@ -260,9 +311,11 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
       });
     } catch (e: any) {
       if (e?.name === "AbortError") return;
+      const msg = e?.message ?? "Failed to load";
       setLayers((prev) =>
-        prev.map((l) => (l.id === layerId ? { ...l, loading: false, error: e?.message ?? "Failed to load" } : l))
+        prev.map((l) => (l.id === layerId ? { ...l, loading: false, error: msg } : l))
       );
+      showToast("error", msg);
     }
   }, []);
 
@@ -582,6 +635,17 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
 
   const colorCountForTableLayer = useMemo(() => Object.keys(tableColorOverrides).length, [tableColorOverrides]);
 
+
+  const overlayTitle = useMemo(() => {
+    if (booting) return "Loading layers…";
+    if (loadingList) return "Refreshing layers…";
+    if (loadingAny) return loadingCount >= 2 ? `Loading layers (${loadingCount})…` : "Loading layer…";
+    return "";
+  }, [booting, loadingList, loadingAny, loadingCount]);
+  
+  const showOverlay = booting || loadingList || loadingAny;
+
+
   const pickAllRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!pickAllRef.current) return;
@@ -607,6 +671,17 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
 
   return (
     <div className="shell">
+      {toast.show ? (
+        <div className="toast" role="status" aria-live="polite">
+          <span className={`dot ${toast.type}`} />
+          <div style={{ lineHeight: 1.2 }}>{toast.message}</div>
+        </div>
+      ) : null}
+
+      {showOverlay && overlayTitle ? (
+        <OverlaySpinner title={overlayTitle} subtitle="Please wait… we’re processing your request." />
+      ) : null}
+
       <style>{`
         :root{
           --bg0:#ffffff;
@@ -1329,32 +1404,92 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
           overflow:hidden;
           line-height: 1;
         }
+
+        @keyframes toastIn { from { transform: translateY(-6px); opacity: 0;} to { transform: translateY(0); opacity: 1;} }
+        @keyframes popIn { from { transform: translateY(6px) scale(.98); opacity: 0;} to { transform: translateY(0) scale(1); opacity: 1;} }
+
+        /* toast */
+        .toast{
+          position: fixed;
+          top: 14px;
+          right: 14px;
+          z-index: 99999;
+          border-radius: 16px;
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.92);
+          backdrop-filter: blur(12px);
+          box-shadow: 0 18px 60px rgba(11,18,32,.18);
+          padding: 10px 12px;
+          display:flex;
+          align-items:center;
+          gap:10px;
+          min-width: 240px;
+          max-width: 360px;
+          animation: toastIn .16s ease-out;
+          font-size: 12px;
+          font-weight: 800;
+          color: rgba(11,18,32,.90);
+        }
+        .dot{ width: 10px; height: 10px; border-radius: 999px; background: rgba(11,18,32,.45); }
+        .dot.success{ background: rgba(15,122,58,.85); }
+        .dot.error{ background: rgba(180,35,24,.95); }
+        .dot.info{ background: rgba(17,102,204,.90); }
+
+        /* admin-style overlay */
+        .overlaySaving{
+          position: fixed;
+          inset: 0;
+          z-index: 9998;
+          background: rgba(255,255,255,.55);
+          backdrop-filter: blur(6px);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding: 18px;
+        }
+        .overlayCard{
+          width: min(520px, 100%);
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.92);
+          border-radius: 22px;
+          box-shadow: 0 24px 90px rgba(11,18,32,.18);
+          padding: 14px 14px;
+          animation: popIn .14s ease-out;
+        }
+        .overlayTop{ display:flex; gap:12px; align-items:center; }
+        .overlayIcon{
+          width: 44px;
+          height: 44px;
+          border-radius: 16px;
+          border: 1px solid var(--stroke);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          background: rgba(11,18,32,.03);
+          flex: 0 0 auto;
+        }
+        .overlayTitle{ font-size: 14px; font-weight: 950; letter-spacing: -.2px; }
+        .overlaySub{
+          margin-top: 3px;
+          font-size: 12px;
+          font-weight: 650;
+          color: rgba(11,18,32,.62);
+          line-height: 1.25;
+        }
+        .overlayHint{
+          margin-top: 10px;
+          display:flex;
+          gap:8px;
+          align-items:center;
+          font-size: 11px;
+          font-weight: 750;
+          color: rgba(11,18,32,.62);
+          padding: 8px 10px;
+          border-radius: 14px;
+          border: 1px dashed rgba(11,18,32,.16);
+          background: rgba(255,255,255,.72);
+        }
       `}</style>
-
-      {booting ? (
-        <div className="bootOverlay" role="status" aria-live="polite">
-          <div className="bootCard">
-            <div className="bootIcon" aria-hidden="true">
-              <FontAwesomeIcon icon={faLayerGroup} opacity={0.9} />
-            </div>
-            <div className="bootText">
-              <div className="bootLine">
-                <div className="bootTitle">Loading Layers..</div>
-                <Ring size={16} />
-              </div>
-              <Shimmer h={10} w="78%" />
-              <Shimmer h={10} w="58%" />
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {showHUD ? (
-        <div className="hud" role="status" aria-live="polite" title="Background loading">
-          <Ring size={16} />
-          <div className="hudCount">{loadingCount}</div>
-        </div>
-      ) : null}
 
       <div className="topBar">
         <div className="brand">

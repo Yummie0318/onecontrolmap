@@ -4,6 +4,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import ResultMap from "@/app/components/ResultMapClient";
 import { createPortal } from "react-dom";
 import AutoLogout from "@/app/components/AutoLogout";
+import Image from "next/image";
+
 /** ---------------- types ---------------- */
 
 type LayerRow = {
@@ -55,6 +57,7 @@ function Icon({
   name:
     | "upload"
     | "reload"
+    | "user"
     | "eye"
     | "download"
     | "rename"
@@ -97,6 +100,13 @@ function Icon({
           <path {...stroke} d="M21 3v6h-6" />
         </svg>
       );
+      case "user":
+        return (
+          <svg {...common}>
+            <path {...stroke} d="M20 21a8 8 0 1 0-16 0" />
+            <path {...stroke} d="M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
+          </svg>
+        );
     case "eye":
       return (
         <svg {...common}>
@@ -485,6 +495,17 @@ export default function AdminLayersPage() {
     window.setTimeout(() => setToast({ show: false }), 2200);
   }
 
+  // user menu
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const [authName, setAuthName] = useState<string>("Guest User");
+
+  function getInitial(name: string) {
+    const s = (name || "").trim();
+    if (!s) return "U";
+    return s[0].toUpperCase();
+  }
   // Upload modal state
   const [showUpload, setShowUpload] = useState(false);
   const [uploadName, setUploadName] = useState("");
@@ -535,6 +556,17 @@ export default function AdminLayersPage() {
     try {
       const loggedIn = localStorage.getItem("is_logged_in") === "1";
       const userRaw = localStorage.getItem("auth_user");
+  
+      // set authName like you already do
+      try {
+        const u = userRaw ? JSON.parse(userRaw) : null;
+        const nm = u?.name || u?.full_name || u?.username || "Guest User";
+        setAuthName(String(nm));
+      } catch {
+        setAuthName("Guest User");
+      }
+  
+      // ✅ keep login_time check if you want (means “must have logged in”)
       const loginTime = Number(localStorage.getItem("login_time") || "0");
   
       if (!loggedIn || !userRaw || !loginTime) {
@@ -542,15 +574,22 @@ export default function AdminLayersPage() {
         return;
       }
   
-      // also ensure not expired
-      const age = Date.now() - loginTime;
-      if (age >= 5 * 60 * 1000) {
-        window.location.href = "/login?reason=expired";
-        return;
-      }
+      // ✅ IMPORTANT: do NOT expire here. AutoLogout handles it.
+      // optional: initialize last_activity if missing
+      const last = Number(localStorage.getItem("last_activity") || "0");
+      if (!last) localStorage.setItem("last_activity", String(Date.now()));
     } catch {
       window.location.href = "/login";
     }
+  }, []);
+
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!userMenuRef.current) return;
+      if (!userMenuRef.current.contains(e.target as Node)) setUserMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
 
   async function previewLayer(layerId: string) {
@@ -584,6 +623,18 @@ export default function AdminLayersPage() {
     const url = `/admin/layers/${encodeURIComponent(layerId)}/edit?name=${encodeURIComponent(name)}`;
     window.open(url, "_blank", "noopener,noreferrer");
     showToast("info", "Opened editor in new tab.");
+  }
+
+  function logoutNow() {
+    try {
+      localStorage.removeItem("is_logged_in");
+      localStorage.removeItem("auth_user");
+      localStorage.removeItem("login_time");
+      localStorage.removeItem("last_activity"); // ✅ add this
+    } catch {}
+  
+    setUserMenuOpen(false);
+    window.location.href = "/login";
   }
 
   async function downloadGeoJSON(layerId: string, name: string) {
@@ -658,39 +709,48 @@ export default function AdminLayersPage() {
   }
 
   async function uploadFile(file: File) {
+    // ✅ close modal immediately
+    setShowUpload(false);
+  
     setUploading(true);
-    setUploadStatus("Uploading…");
+    setUploadStatus(""); // optional: clear modal text since it’s closing
     setError("");
-
+  
     try {
       const form = new FormData();
       form.append("file", file);
       if (uploadName.trim()) form.append("name", uploadName.trim());
-
+  
       const res = await fetch("/api/layers/upload", { method: "POST", body: form });
       const text = await res.text();
       const data: any = safeJsonParse(text);
-
+  
       if (!data.ok) {
         const msg = data.error ?? "Upload failed";
-        setUploadStatus(`❌ ${msg}`);
         showToast("error", msg);
+  
+        // ✅ reopen modal if upload failed (so user can try again)
+        setShowUpload(true);
+        setUploadStatus(`❌ ${msg}`);
         return;
       }
-
-      setUploadStatus(`✅ Uploaded: ${data.name} (${data.featureCount} features)`);
+  
       showToast("success", "Upload complete.");
       await refresh();
       if (data.layerId) await previewLayer(data.layerId);
     } catch (e: any) {
       const msg = e?.message ?? "Unknown error";
-      setUploadStatus(`❌ Upload failed: ${msg}`);
       showToast("error", `Upload failed: ${msg}`);
+  
+      // ✅ reopen modal on error
+      setShowUpload(true);
+      setUploadStatus(`❌ Upload failed: ${msg}`);
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
+
 
   function openRename(layer: LayerRow) {
     setRenameId(layer.id);
@@ -826,6 +886,55 @@ export default function AdminLayersPage() {
           align-items:flex-start;
           gap: 10px;
           flex-wrap: wrap;
+          position: relative;
+          z-index: 70000;
+        }
+          /* brand block (same concept as ViewMapPage header) */
+        .brand{
+          display:flex;
+          align-items:center;
+          gap:10px;
+          min-width:0;
+        }
+
+        .appIcon{
+          width: 36px;
+          height: 36px;
+          border-radius: 14px;
+          border: 1px solid rgba(11,18,32,.10);
+          background: rgba(255,255,255,.92);
+          box-shadow: 0 16px 40px rgba(11,18,32,.10);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          overflow:hidden;
+          flex: 0 0 auto;
+        }
+
+        .titleWrap{
+          display:flex;
+          flex-direction:column;
+          gap:1px;
+          min-width:0;
+        }
+
+        .titleMain{
+          font-size: 15px;
+          font-weight: 1000;
+          letter-spacing: -.25px;
+          line-height: 1.1;
+          white-space:nowrap;
+          overflow:hidden;
+          text-overflow: ellipsis;
+        }
+
+        .titleSub{
+          font-size: 11px;
+          font-weight: 900;
+          color: var(--muted);
+          white-space:nowrap;
+          overflow:hidden;
+          text-overflow: ellipsis;
         }
         .title{
           font-weight: 1000;
@@ -842,7 +951,93 @@ export default function AdminLayersPage() {
           font-weight: 650;
           margin-top: 4px;
         }
-        .tools{ margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+      .tools{ margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+      /* user menu */
+      .userWrap{ position: relative; }
+
+    .avatarBtn{
+        width: 36px;
+        height: 36px;
+        border-radius: 999px;
+        border: 1px solid rgba(11,18,32,.12);
+        background: rgba(255,255,255,.92);
+        box-shadow: 0 12px 28px rgba(11,18,32,.10);
+
+        display:flex;
+        align-items:center;
+        justify-content:center;
+
+        cursor:pointer;
+        user-select:none;
+
+        /* ✅ badge text style (ViewMap-like) */
+        font-size: 13px;
+        font-weight: 950;
+        letter-spacing: -.2px;
+        line-height: 1;
+
+        color: var(--primary);
+      }
+
+      .avatarBtn:hover{
+        border-color: rgba(11,18,32,.18);
+        box-shadow: 0 16px 34px rgba(11,18,32,.14);
+        transform: translateY(-1px);
+      }
+
+      .avatarBtn:active{
+        transform: translateY(0);
+      }
+
+      .userMenu{
+        position: absolute;
+        top: calc(100% + 10px);
+        right: 0;
+        width: 220px;
+        border-radius: 18px;
+        border: 1px solid var(--stroke);
+        background: rgba(255,255,255,.98);
+        box-shadow: 0 30px 90px rgba(11,18,32,.18);
+        overflow: hidden;
+        z-index: 99999;
+        animation: popIn .14s ease-out;
+      }
+
+      .userMenuHead{
+        padding: 12px;
+        border-bottom: 1px solid rgba(11,16,32,.08);
+      }
+      .userName{
+        font-size: 13px;
+        font-weight: 950;
+        letter-spacing: -.2px;
+      }
+      .userSub{
+        margin-top: 2px;
+        font-size: 11px;
+        font-weight: 650;
+        color: var(--muted);
+      }
+
+      .userItem{
+        width:100%;
+        display:flex;
+        align-items:center;
+        gap:10px;
+        padding: 11px 12px;
+        border:0;
+        background: transparent;
+        cursor:pointer;
+        font-size: 13px;
+        font-weight: 700;
+        color: rgba(11,16,32,.92);
+      }
+      .userItem:hover{ background: rgba(15,122,58,.06); }
+
+      .userSep{ height: 1px; background: rgba(11,16,32,.08); }
+
+      .userItem.red{ color: #b42318; }
 
         .pill{
           font-size: 11px;
@@ -1282,6 +1477,7 @@ export default function AdminLayersPage() {
         .dotsItem.violet{ color: var(--violet); }
         .dotsItem.red{ color: var(--red); }
         .dotsItem.dark{ color: #111827; }
+      
       `}</style>
 
       {toast.show ? (
@@ -1295,41 +1491,106 @@ export default function AdminLayersPage() {
         <OverlaySpinner title={overlayTitle} subtitle="Please wait… we’re processing your request." />
       ) : null}
 
-      <div className="topbar">
-        <div className="title">
-          <div>Layers</div>
-          <div className="sub">Upload • Preview • Rename • Edit Attributes</div>
+        <div className="topbar">
+          {/* LEFT: logo + title (same as ViewMapPage header) */}
+          <div className="brand">
+            <div className="appIcon" aria-hidden="true">
+              <Image
+                src="/images/denr.png"
+                alt="DENR Logo"
+                width={28}
+                height={28}
+                style={{ objectFit: "contain" }}
+                priority
+              />
+            </div>
+
+            <div className="titleWrap">
+              <div className="titleMain">One Control Map</div>
+              <div className="titleSub">PENRO Cagayan/Admin</div>
+            </div>
+          </div>
+
+          {/* RIGHT: actions */}
+          <div className="tools">
+            <Tooltip text="Upload">
+              <button
+                onClick={openUpload}
+                disabled={uiLocked}
+                className="iconBtn iconBtnSm iconBtnPrimary"
+                aria-label="Upload"
+              >
+                <Icon name="upload" />
+              </button>
+            </Tooltip>
+
+            <Tooltip text="Refresh">
+              <button
+                onClick={refresh}
+                disabled={uiLocked}
+                className="iconBtn iconBtnSm iconBtnCyan"
+                aria-label="Refresh"
+              >
+                <Icon name="reload" />
+              </button>
+            </Tooltip>
+
+            <div className="userWrap" ref={userMenuRef}>
+              <Tooltip text="Account">
+              <button
+                type="button"
+                className="avatarBtn"
+                onClick={() => setUserMenuOpen((v) => !v)}
+                aria-haspopup="menu"
+                aria-expanded={userMenuOpen ? "true" : "false"}
+                aria-label={`Account: ${authName}`}
+              >
+                {getInitial(authName)}
+              </button>
+              </Tooltip>
+
+              {userMenuOpen ? (
+                <div className="userMenu" role="menu">
+                  <div className="userMenuHead">
+                    <div className="userName">{authName}</div>
+                    <div className="userSub">Admin</div>
+                  </div>
+
+                  <button
+                    className="userItem"
+                    role="menuitem"
+                    type="button"
+                    onClick={() => {
+                      setUserMenuOpen(false);
+                      window.location.href = "/viewmap";
+                    }}
+                  >
+                    <Icon name="open" size={16} />
+                    View Map
+                  </button>
+
+                  <div className="userSep" />
+
+                  <button
+                    className="userItem red"
+                    role="menuitem"
+                    type="button"
+                    onClick={logoutNow}
+                  >
+                    <Icon name="x" size={16} />
+                    Logout
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
         </div>
 
-        <span className="pill" title="Total layers shown">
-          <Icon name="info" size={14} />
-          {loadingList ? "Loading…" : `${filteredLayers.length} layers`}
-        </span>
 
-        <div className="tools" />
 
-        <Tooltip text="Upload">
-          <button
-            onClick={openUpload}
-            disabled={uiLocked}
-            className="iconBtn iconBtnSm iconBtnPrimary"
-            aria-label="Upload"
-          >
-            <Icon name="upload" />
-          </button>
-        </Tooltip>
 
-        <Tooltip text="Refresh">
-          <button
-            onClick={refresh}
-            disabled={uiLocked}
-            className="iconBtn iconBtnSm iconBtnCyan"
-            aria-label="Refresh"
-          >
-            <Icon name="reload" />
-          </button>
-        </Tooltip>
-      </div>
+
+
 
       <div className="grid">
         <div className="card">
