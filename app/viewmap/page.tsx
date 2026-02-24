@@ -1173,7 +1173,7 @@ const requestUserLocation = useCallback(() => {
         .sheetOverlay{
           position: fixed; inset: 0;
           background: rgba(11,18,32,.42);
-          z-index: 9999;
+          z-index: 80000;
           display:flex;
           align-items:flex-end;
           justify-content:center;
@@ -1192,6 +1192,8 @@ const requestUserLocation = useCallback(() => {
           transform: translateY(14px);
           opacity: 0;
           animation: sheetIn .18s ease-out forwards;
+          position: relative;
+          z-index: 80001;
         }
         @keyframes sheetIn{ to{ transform: translateY(0); opacity: 1; } }
         .grab{
