@@ -1,3 +1,4 @@
+// C:\Users\Yummie03\Desktop\onemap\app\components\ResultMap.tsx
 "use client";
 
 import {
@@ -9,7 +10,7 @@ import {
   useMap,
   useMapEvents,
 } from "react-leaflet";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -17,7 +18,9 @@ import "leaflet/dist/leaflet.css";
 import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
 import markerIcon from "leaflet/dist/images/marker-icon.png";
 import markerShadow from "leaflet/dist/images/marker-shadow.png";
+
 import type { ResultMapProps } from "./ResultMapClient";
+
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: (markerIcon2x as any).src ?? markerIcon2x,
@@ -34,16 +37,17 @@ export type MapLayerInput = {
   orderNo?: number;
 };
 
-type Props = {
-  geojson?: any | null;
-  layers?: MapLayerInput[];
-
-  // ✅ NEW
+type Props = ResultMapProps & {
   showBasemap?: boolean;
   backgroundColor?: string;
 };
 
 const DEFAULT_FALLBACK_COLOR = "#0b1220";
+
+/** ✅ your injected layer id in viewmap/page.tsx */
+const MY_LOC_LAYER_ID = "__my_location__";
+/** ✅ dedicated pane for My Location (always on top) */
+const MY_LOC_PANE = "pane-my-location";
 
 function safeInvalidate(map: any) {
   try {
@@ -77,7 +81,6 @@ function InvalidateOnEvents() {
   return null;
 }
 
-// ✅ extra invalidate when basemap toggles
 function InvalidateOnBasemapToggle({ showBasemap }: { showBasemap: boolean }) {
   const map = useMap();
   useEffect(() => {
@@ -106,6 +109,78 @@ function safeGeojsonForBounds(geojson: any) {
 
   if (safe.length === 0) return null;
   return { ...geojson, features: safe };
+}
+
+/** ✅ get "My Location" coords if present in a layer */
+function extractMyLocationLatLngFromLayer(layer: MapLayerInput): { lat: number; lng: number } | null {
+  if (!layer?.geojson?.features || !Array.isArray(layer.geojson.features)) return null;
+
+  for (const f of layer.geojson.features) {
+    const markerType = f?.properties?.__marker;
+    const label = f?.properties?.label;
+    const geom = f?.geometry;
+
+    if (!geom || geom.type !== "Point") continue;
+    const coords = geom.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) continue;
+
+    // Accept either your explicit __marker=dot or label=My Location
+    if (markerType === "dot" || label === "My Location") {
+      const lng = Number(coords[0]);
+      const lat = Number(coords[1]);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+    }
+  }
+  return null;
+}
+
+/** ✅ fly to My Location when it updates */
+function FlyToMyLocation({ layers }: { layers: MapLayerInput[] }) {
+  const map = useMap();
+
+  const loc = useMemo(() => {
+    // Prefer the injected My Location layer id
+    const myLayer = layers.find((l) => l.id === MY_LOC_LAYER_ID) ?? null;
+    if (myLayer) {
+      const p = extractMyLocationLatLngFromLayer(myLayer);
+      if (p) return p;
+    }
+
+    // Fallback: search any layer for __marker=dot
+    for (const l of layers) {
+      const p = extractMyLocationLatLngFromLayer(l);
+      if (p) return p;
+    }
+    return null;
+  }, [layers]);
+
+  const locSig = loc ? `${loc.lat.toFixed(6)},${loc.lng.toFixed(6)}` : "none";
+
+  useEffect(() => {
+    if (!loc) return;
+
+    // ✅ Make sure location is visible even when super zoomed:
+    // keep at least 16, but DO NOT force higher than maxZoom.
+    const current = map.getZoom?.() ?? 0;
+    const targetZoom = Math.max(current, 16);
+
+    try {
+      map.flyTo([loc.lat, loc.lng], targetZoom, { animate: true, duration: 0.85 });
+    } catch {
+      try {
+        map.setView([loc.lat, loc.lng], targetZoom);
+      } catch {}
+    }
+
+    const t1 = setTimeout(() => safeInvalidate(map), 0);
+    const t2 = setTimeout(() => safeInvalidate(map), 200);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [locSig, map]);
+
+  return null;
 }
 
 function FitToGeoJson({ geojson }: { geojson: any | null }) {
@@ -154,6 +229,9 @@ function FitToMany({ layers }: { layers: MapLayerInput[] }) {
       let merged: L.LatLngBounds | null = null;
 
       for (const l of layers) {
+        // ✅ IMPORTANT: do NOT include My Location in fit bounds
+        if (l.id === MY_LOC_LAYER_ID) continue;
+
         const safe = safeGeojsonForBounds(l.geojson);
         if (!safe) continue;
 
@@ -185,24 +263,37 @@ function FitToMany({ layers }: { layers: MapLayerInput[] }) {
   return null;
 }
 
-function styleForColor(color: string) {
+function styleForColor(color: string, isPolygon: boolean, isSelected: boolean) {
   return {
     color,
-    weight: 2.5,
+    weight: isSelected ? 4 : 2.5,
     opacity: 0.95,
     fillColor: color,
-    fillOpacity: 0.28,
+    fillOpacity: isPolygon ? (isSelected ? 0.36 : 0.28) : 0,
   } as L.PathOptions;
 }
 
-function pointStyle(color: string) {
+// ✅ default point style (with outline)
+function pointStyle(color: string, isSelected: boolean) {
   return {
-    radius: 5,
+    radius: isSelected ? 6 : 5,
     color,
-    weight: 2,
+    weight: isSelected ? 3 : 2,
     opacity: 0.95,
     fillColor: color,
     fillOpacity: 0.85,
+  } as L.CircleMarkerOptions;
+}
+
+// ✅ plain dot (no outline) for "My Location"
+function pointDotStyle(color: string, isSelected: boolean) {
+  return {
+    radius: isSelected ? 7 : 6, // ✅ make it slightly bigger so it stays visible
+    stroke: false,
+    weight: 0,
+    opacity: 1,
+    fillColor: color,
+    fillOpacity: 1,
   } as L.CircleMarkerOptions;
 }
 
@@ -212,10 +303,20 @@ function getFeatureColor(feature: any, layerColor: string) {
   return layerColor;
 }
 
+function getFeatureFid(feature: any) {
+  return feature?.id ?? feature?.properties?.__fid ?? feature?.properties?.fid ?? null;
+}
+
+function isPolygonGeom(feature: any) {
+  const t = feature?.geometry?.type;
+  return t === "Polygon" || t === "MultiPolygon";
+}
+
 function bindPopupDENR(feature: any, layer: any) {
   const p = feature?.properties ?? {};
 
   const title =
+    p.label ||
     p.PO_NAME ||
     p.PO_ALIAS ||
     p.PA ||
@@ -226,6 +327,8 @@ function bindPopupDENR(feature: any, layer: any) {
     "Feature";
 
   const preferredKeys = [
+    "label",
+    "accuracy_m",
     "PO_NAME",
     "PO_ALIAS",
     "CBFMA_NO",
@@ -296,7 +399,9 @@ export default function ResultMap(props: Props) {
   }, [normalizedLayers]);
 
   const hasAnyData = useMemo(() => {
-    return orderedLayers.some((l) => Array.isArray(l.geojson?.features) && l.geojson.features.length > 0);
+    return orderedLayers.some(
+      (l) => Array.isArray(l.geojson?.features) && l.geojson.features.length > 0
+    );
   }, [orderedLayers]);
 
   const mapKey = useMemo(() => {
@@ -305,8 +410,9 @@ export default function ResultMap(props: Props) {
       .map((l) => (Array.isArray(l.geojson?.features) ? l.geojson.features.length : 0))
       .join(",");
     const orders = orderedLayers.map((l) => `${l.id}:${l.orderNo ?? 0}`).join("|");
-    return `map-${ids}-${counts}-${orders}`;
-  }, [orderedLayers]);
+    const sel = props.selectedFid ? String(props.selectedFid) : "none";
+    return `map-${ids}-${counts}-${orders}-${sel}`;
+  }, [orderedLayers, props.selectedFid]);
 
   const Z_BASE = 450;
 
@@ -317,7 +423,7 @@ export default function ResultMap(props: Props) {
         center={[17.7, 121.7]}
         zoom={8}
         zoomControl
-        attributionControl={showBasemap} // ✅ hide attribution when basemap off
+        attributionControl={showBasemap}
         style={{
           position: "absolute",
           inset: 0,
@@ -325,7 +431,7 @@ export default function ResultMap(props: Props) {
           height: "100%",
           borderRadius: 16,
           border: "1px solid #e5e5e5",
-          background: backgroundColor, // ✅ white background when basemap off
+          background: backgroundColor,
         }}
         whenReady={(ctx: any) => {
           ctx?.target?.invalidateSize?.();
@@ -335,8 +441,9 @@ export default function ResultMap(props: Props) {
         <InvalidateOnEvents />
         <InvalidateOnBasemapToggle showBasemap={showBasemap} />
 
-        {/* ✅ Basemap tiles are OPTIONAL.
-            Map + vectors stay ON, so projection/fitBounds still works */}
+        {/* ✅ Pan/zoom to My Location when it updates */}
+        <FlyToMyLocation layers={orderedLayers} />
+
         {showBasemap ? (
           <AnyLayersControl position="topright">
             <AnyLayersControl.BaseLayer checked name="Street (OSM)">
@@ -363,17 +470,25 @@ export default function ResultMap(props: Props) {
         ) : null}
 
         {/* ✅ fit bounds still works whether basemap is ON or OFF */}
-        {props.layers?.length ? <FitToMany layers={orderedLayers} /> : <FitToGeoJson geojson={props.geojson ?? null} />}
+        {props.layers?.length ? (
+          <FitToMany layers={orderedLayers} />
+        ) : (
+          <FitToGeoJson geojson={props.geojson ?? null} />
+        )}
 
         {orderedLayers.map((layer) => {
           const feats = layer.geojson?.features;
           const hasData = Array.isArray(feats) && feats.length > 0;
           if (!hasData) return null;
 
+          const isMyLocLayer = layer.id === MY_LOC_LAYER_ID;
+
           const baseColor = layer.color || DEFAULT_FALLBACK_COLOR;
           const geoKey = `geo-${layer.id}-${feats.length}`;
-          const paneName = `pane-${layer.id}`;
-          const z = Z_BASE + (layer.orderNo ?? 0);
+
+          // ✅ My Location gets its own pane and extreme zIndex so it never hides
+          const paneName = isMyLocLayer ? MY_LOC_PANE : `pane-${layer.id}`;
+          const z = isMyLocLayer ? 999999 : Z_BASE + (layer.orderNo ?? 0);
 
           return (
             <AnyPane key={`pane-${layer.id}`} name={paneName} style={{ zIndex: z }}>
@@ -381,25 +496,101 @@ export default function ResultMap(props: Props) {
                 key={geoKey}
                 data={layer.geojson}
                 pane={paneName}
-                style={(feature: any) => styleForColor(getFeatureColor(feature, baseColor))}
-                pointToLayer={(feature: any, latlng: any) =>
-                  L.circleMarker(latlng, pointStyle(getFeatureColor(feature, baseColor)))
-                }
+                style={(feature: any) => {
+                  const c = getFeatureColor(feature, baseColor);
+                  const fid = getFeatureFid(feature);
+                  const selected =
+                    props.selectedFid != null &&
+                    fid != null &&
+                    String(fid) === String(props.selectedFid);
+                  const poly = isPolygonGeom(feature);
+                  return styleForColor(c, poly, selected);
+                }}
+                pointToLayer={(feature: any, latlng: any) => {
+                  const c = getFeatureColor(feature, baseColor);
+                  const fid = getFeatureFid(feature);
+                  const selected =
+                    props.selectedFid != null &&
+                    fid != null &&
+                    String(fid) === String(props.selectedFid);
+
+                  const markerType = feature?.properties?.__marker;
+                  if (markerType === "dot") return L.circleMarker(latlng, pointDotStyle(c, selected));
+                  return L.circleMarker(latlng, pointStyle(c, selected));
+                }}
                 onEachFeature={(feature: any, leafletLayer: any) => {
                   bindPopupDENR(feature, leafletLayer);
 
+                  const markerType = feature?.properties?.__marker;
+                  const isDot = markerType === "dot";
+
+                  // ✅ force dot (and the whole my-location layer) to stay on top
+                  if (isMyLocLayer || isDot) {
+                    try {
+                      leafletLayer.bringToFront?.();
+                    } catch {}
+                  }
+
+                  leafletLayer.on?.("click", () => {
+                    const fid = getFeatureFid(feature);
+                    if (fid != null && props.onFeatureFidClick) props.onFeatureFidClick(String(fid));
+
+                    // ✅ re-bring to front on click (some browsers reorder SVG)
+                    if (isMyLocLayer || isDot) {
+                      try {
+                        leafletLayer.bringToFront?.();
+                      } catch {}
+                    }
+                  });
+
                   leafletLayer.on?.("mouseover", () => {
                     const c = getFeatureColor(feature, baseColor);
+                    const fid = getFeatureFid(feature);
+                    const selected =
+                      props.selectedFid != null &&
+                      fid != null &&
+                      String(fid) === String(props.selectedFid);
+
                     try {
-                      leafletLayer.setStyle?.({ ...styleForColor(c), weight: 4, fillOpacity: 0.38 });
+                      if (isPolygonGeom(feature)) {
+                        leafletLayer.setStyle?.({
+                          ...styleForColor(c, true, selected),
+                          weight: selected ? 5 : 4,
+                          fillOpacity: selected ? 0.42 : 0.38,
+                        });
+                      } else if (markerType === "dot") {
+                        leafletLayer.setStyle?.(pointDotStyle(c, true));
+                      } else {
+                        leafletLayer.setStyle?.(pointStyle(c, true));
+                      }
                     } catch {}
+
+                    if (isMyLocLayer || isDot) {
+                      try {
+                        leafletLayer.bringToFront?.();
+                      } catch {}
+                    }
                   });
 
                   leafletLayer.on?.("mouseout", () => {
                     const c = getFeatureColor(feature, baseColor);
+                    const fid = getFeatureFid(feature);
+                    const selected =
+                      props.selectedFid != null &&
+                      fid != null &&
+                      String(fid) === String(props.selectedFid);
+
                     try {
-                      leafletLayer.setStyle?.(styleForColor(c));
+                      if (isPolygonGeom(feature)) leafletLayer.setStyle?.(styleForColor(c, true, selected));
+                      else if (markerType === "dot") leafletLayer.setStyle?.(pointDotStyle(c, selected));
+                      else leafletLayer.setStyle?.(pointStyle(c, selected));
                     } catch {}
+
+                    if (isMyLocLayer || isDot) {
+                      try {
+                        leafletLayer.bringToFront?.();
+                      } catch {}
+                    }
                   });
                 }}
               />
@@ -408,7 +599,6 @@ export default function ResultMap(props: Props) {
         })}
       </AnyMapContainer>
 
-      {/* optional hint when no data */}
       {!hasAnyData ? (
         <div
           style={{

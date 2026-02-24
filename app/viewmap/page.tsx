@@ -20,6 +20,7 @@ import {
   faPalette,
   faEraser,
   faUserShield,
+  faLocationCrosshairs, // ✅ ADD THIS
 } from "@fortawesome/free-solid-svg-icons";
 
 type LayerRow = {
@@ -188,6 +189,49 @@ export default function ViewMapPage() {
   // basemap toggle (true = show tiles, false = plain white)
 const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
 
+// ✅ --- USER LOCATION (My Location) ---
+const [userLoc, setUserLoc] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
+const [locLoading, setLocLoading] = useState(false);
+
+const requestUserLocation = useCallback(() => {
+  if (typeof window === "undefined") return;
+
+  if (!("geolocation" in navigator)) {
+    showToast("error", "Geolocation is not supported by this browser.");
+    return;
+  }
+
+  setLocLoading(true);
+
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const accuracy = pos.coords.accuracy;
+
+      setUserLoc({ lat, lng, accuracy });
+      showToast("success", "Location found.");
+      setLocLoading(false);
+    },
+    (err) => {
+      // common: permission denied, timeout, unavailable
+      const msg =
+        err?.code === 1
+          ? "Location permission denied."
+          : err?.code === 2
+          ? "Location unavailable."
+          : "Location request timed out.";
+
+      showToast("error", msg);
+      setLocLoading(false);
+    },
+    {
+      enableHighAccuracy: true,
+      timeout: 12000,
+      maximumAge: 0,
+    }
+  );
+}, [showToast]);
 
   // attribute table viewer state
   const [tableOpen, setTableOpen] = useState(false);
@@ -626,8 +670,33 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
       })
       .join("|");
 
-    return `${visibleLayers.length}-${hashString(selSig)}-${hashString(clrSig)}`;
+      const locSig = userLoc ? `${userLoc.lat.toFixed(6)},${userLoc.lng.toFixed(6)}` : "none";
+      return `${visibleLayers.length}-${hashString(selSig)}-${hashString(clrSig)}-${hashString(locSig)}`;
   }, [visibleLayers.length, selectedFeatureIdxByLayer, featureColorByLayer]);
+
+  const userLocGeojson = useMemo(() => {
+    if (!userLoc) return null;
+  
+    return {
+      type: "FeatureCollection",
+      features: [
+  {
+    type: "Feature",
+    id: "me",
+    properties: { __color: "#ef4444", __marker: "dot", label: "My Location", accuracy_m: userLoc.accuracy ?? null },
+    geometry: { type: "Point", coordinates: [userLoc.lng, userLoc.lat] },
+  },
+  ...(userLoc.accuracy
+    ? [{
+        type: "Feature",
+        id: "me-accuracy",
+        properties: { __color: "#ef4444", __marker: "accuracy" },
+        geometry: { type: "Point", coordinates: [userLoc.lng, userLoc.lat] },
+      }]
+    : []),
+]
+    };
+  }, [userLoc]);
 
   const loadingAny = useMemo(() => layers.some((l) => l.loading), [layers]);
   const loadingCount = useMemo(() => layers.filter((l) => l.loading).length, [layers]);
@@ -1575,6 +1644,7 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
                   <FontAwesomeIcon icon={faEyeSlash} />
                 </button>
               </div>
+              
             </div>
 
             <div className="searchWrap">
@@ -1698,7 +1768,13 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button
               className={showBasemap ? "btn btnPrimary" : "btn btnGhost"}
-              onClick={() => setShowBasemap((v) => !v)}
+              onClick={() => {
+                setShowBasemap((v) => {
+                  const next = !v;
+                  if (!next) setUserLoc(null); // optional
+                  return next;
+                });
+              }}
               title={showBasemap ? "Basemap ON" : "Basemap OFF (faster)"}
               type="button"
             >
@@ -1708,6 +1784,19 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
               <button className="btn btnPrimary iconBtn" onClick={refreshList} disabled={loadingList} title="Refresh layer list" type="button">
                 {loadingList ? <Ring size={16} /> : <FontAwesomeIcon icon={faRotateRight} />}
               </button>
+
+              {showBasemap ? (
+              <button
+              className="btn btnGhost iconBtn"
+              onClick={requestUserLocation}
+              disabled={locLoading}
+              title={userLoc ? "Update my location" : "Show my location"}
+              type="button"
+            >
+              {locLoading ? <Ring size={16} /> : <FontAwesomeIcon icon={faLocationCrosshairs} />}
+            </button>
+              ) : null}
+
 
               {/* <button className="btn btnGhost iconBtn" onClick={reloadVisibleLayers} disabled={visibleCount === 0} title="Reload visible layers" type="button">
                 <FontAwesomeIcon icon={faArrowsRotate} />
@@ -1719,15 +1808,33 @@ const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
             <div className="mapInner">
             <ResultMap
               key={mapKey}
-              showBasemap={showBasemap}        // ✅ use state toggle
+              showBasemap={showBasemap}
               backgroundColor="#ffffff"
-              layers={visibleLayers.map((v) => ({
-                id: v.id,
-                name: v.name,
-                color: DEFAULT_LAYER_COLOR,
-                geom_type: v.geom_type,
-                geojson: v.geojson,
-              }))}
+              layers={[
+                ...visibleLayers.map((v) => ({
+                  id: v.id,
+                  name: v.name,
+                  color: DEFAULT_LAYER_COLOR,
+                  geom_type: v.geom_type,
+                  geojson: v.geojson,
+                  // ✅ give proper order so later items don't cover it
+                  orderNo: layerOrderNumberById[v.id] ?? 1,
+                })),
+
+                // ✅ ALWAYS add My Location if it exists (NOT tied to showBasemap)
+                ...(userLocGeojson
+                  ? [
+                      {
+                        id: "__my_location__",
+                        name: "My Location",
+                        color: "#ef4444",
+                        geom_type: "Point",
+                        geojson: userLocGeojson,
+                        orderNo: 999999, // ✅ always top
+                      },
+                    ]
+                  : []),
+              ]}
             />
 
 
