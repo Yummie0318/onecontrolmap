@@ -15,13 +15,13 @@ export type ResultMapProps = {
   geojson?: any | null;
   layers?: MapLayerInput[];
 
-  // ✅ NEW: selected feature (by properties.__fid)
-  selectedFid?: string | null;
-
-  // ✅ NEW: callback when a feature is clicked
+  // ✅ feature click (by feature id / fid)
   onFeatureFidClick?: (fid: string) => void;
 
-  // ✅ existing
+  // ✅ map events
+  onMapMouseMove?: (lat: number, lng: number) => void;
+  onMapClick?: (lat: number, lng: number) => void;
+
   showBasemap?: boolean;
   backgroundColor?: string;
 };
@@ -102,10 +102,11 @@ export default function ResultMapClient(props: ResultMapProps) {
     <ResultMap
       layers={normalizedLayers}
       geojson={props.geojson ?? null}
-      selectedFid={props.selectedFid ?? null}
-      onFeatureFidClick={props.onFeatureFidClick}
       showBasemap={props.showBasemap}
       backgroundColor={props.backgroundColor}
+      onFeatureFidClick={props.onFeatureFidClick}
+      onMapMouseMove={props.onMapMouseMove}
+      onMapClick={props.onMapClick}
     />
   );
 }

@@ -17,10 +17,19 @@ import {
   faArrowsRotate,
   faTable,
   faChevronDown,
+  faChevronRight,
   faPalette,
   faEraser,
   faUserShield,
-  faLocationCrosshairs, // ✅ ADD THIS
+  faLocationCrosshairs,
+  faArrowUp,
+  faArrowDown,
+  faAnglesUp,
+  faAnglesDown,
+  faPlus,
+  faMinus,
+  faBars,
+  faSliders,
 } from "@fortawesome/free-solid-svg-icons";
 
 type LayerRow = {
@@ -49,6 +58,10 @@ type MapLayer = {
 const DEFAULT_LAYER_COLOR = "#2563eb";
 /** default color used by the table color picker */
 const DEFAULT_TABLE_COLOR = "#2563eb";
+
+/** pseudo layers */
+const MY_LOC_LAYER_ID = "__my_location__";
+const MEASURE_LAYER_ID = "__measure__";
 
 function safeJsonParse(text: string) {
   try {
@@ -122,15 +135,57 @@ function Shimmer({ h = 14, w = "100%" }: { h?: number; w?: string }) {
   return <span className="shimmer" style={{ height: h, width: w }} aria-hidden="true" />;
 }
 
+// ✅ GROUPING HELPERS (put ABOVE ViewMapPage)
+function getLayerGroup(name: string) {
+  const n = (name || "").trim().toUpperCase();
+
+  if (n.startsWith("NGP_")) return "NGP";
+  if (n.startsWith("CADT")) return "CADT";
+  if (n.startsWith("CADC")) return "CADC";
+  if (n.startsWith("CBFMA")) return "CBFMA";
+  if (n.startsWith("PA")) return "PA";
+  if (n.startsWith("CSC")) return "CSC";
+  if (n.startsWith("FLAG_")) return "FLAG";
+  if (n.startsWith("FLAGT_")) return "FLAGT";
+  if (n.startsWith("FLGMA_")) return "FLGMA";
+  if (n.startsWith("FORESHORE_")) return "FORESHORE";
+  if (n.startsWith("GSUP_")) return "GSUP";
+  if (n.startsWith("SIFMA_")) return "SIFMA";
+  if (n.startsWith("SLUP_")) return "SLUP";
+  if (n.startsWith("TFLA_")) return "TFLA";
+  if (n.startsWith("A&D")) return "A&D";
+  return "OTHERS";
+}
+
+const GROUP_ORDER = [
+  "A&D",
+  "CADC",
+  "CADT",
+  "CBFMA",
+  "CSC",
+  "FLAG",
+  "FLAGT",
+  "FLGMA",
+  "FORESHORE",
+  "GSUP",
+  "NGP",
+  "PA",
+  "SIFMA",
+  "SLUP",
+  "TFLA",
+  "OTHERS"
+] as const;
+
+type GroupKey = (typeof GROUP_ORDER)[number];
+
+
 function hashString(s: string) {
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = (h * 33) ^ s.charCodeAt(i);
   return (h >>> 0).toString(16);
 }
 
-type ToastState =
-  | { show: false }
-  | { show: true; type: "success" | "error" | "info"; message: string };
+type ToastState = { show: false } | { show: true; type: "success" | "error" | "info"; message: string };
 
 function SpinnerDot({ size = 16 }: { size?: number }) {
   return (
@@ -139,8 +194,8 @@ function SpinnerDot({ size = 16 }: { size?: number }) {
         width: size,
         height: size,
         borderRadius: 999,
-        border: "2px solid rgba(11,18,32,.18)",
-        borderTopColor: "rgba(11,18,32,.78)",
+        border: "2px solid rgba(11,18,32,.16)",
+        borderTopColor: "rgba(11,18,32,.75)",
         display: "inline-block",
         animation: "spin .85s linear infinite",
       }}
@@ -162,12 +217,34 @@ function OverlaySpinner({ title, subtitle }: { title: string; subtitle?: string 
           </div>
         </div>
         <div className="overlayHint">
-          <span style={{ fontWeight: 900 }}>ℹ</span>
+          <span style={{ fontWeight: 700 }}>ℹ</span>
           Actions are temporarily disabled to prevent duplicate requests.
         </div>
       </div>
     </div>
   );
+}
+
+/** --- distance helpers (meters) --- */
+function toRad(d: number) {
+  return (d * Math.PI) / 180;
+}
+function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const R = 6371000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const s =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+  return R * c;
+}
+function formatDistance(m: number) {
+  if (!Number.isFinite(m)) return "-";
+  if (m < 1000) return `${Math.round(m)} m`;
+  return `${(m / 1000).toFixed(m >= 10000 ? 1 : 2)} km`;
 }
 
 export default function ViewMapPage() {
@@ -177,8 +254,9 @@ export default function ViewMapPage() {
     layersRef.current = layers;
   }, [layers]);
 
-  // ✅ keeps the “checkbox click order” (first clicked = bottom, last clicked = top)
+  /** Draw order (BOTTOM -> TOP). Includes real layer ids + pseudo ids */
   const [layerDrawOrder, setLayerDrawOrder] = useState<string[]>([]);
+
   const [loadingList, setLoadingList] = useState(false);
   const [booting, setBooting] = useState(true);
 
@@ -186,79 +264,261 @@ export default function ViewMapPage() {
   const isFiltering = search.trim().length > 0;
 
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
-  // basemap toggle (true = show tiles, false = plain white)
-const [showBasemap, setShowBasemap] = useState(false); // default OFF = faster
+  const [mobileTab, setMobileTab] = useState<"all" | "selected">("all");
+  const [desktopTab, setDesktopTab] = useState<"all" | "selected">("all");
 
-// ✅ --- USER LOCATION (My Location) ---
-const [userLoc, setUserLoc] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
-const [locLoading, setLocLoading] = useState(false);
-
-const requestUserLocation = useCallback(() => {
-  if (typeof window === "undefined") return;
-
-  if (!("geolocation" in navigator)) {
-    showToast("error", "Geolocation is not supported by this browser.");
-    return;
-  }
-
-  setLocLoading(true);
-
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      const lat = pos.coords.latitude;
-      const lng = pos.coords.longitude;
-      const accuracy = pos.coords.accuracy;
-
-      setUserLoc({ lat, lng, accuracy });
-      showToast("success", "Location found.");
-      setLocLoading(false);
-    },
-    (err) => {
-      // common: permission denied, timeout, unavailable
-      const msg =
-        err?.code === 1
-          ? "Location permission denied."
-          : err?.code === 2
-          ? "Location unavailable."
-          : "Location request timed out.";
-
-      showToast("error", msg);
-      setLocLoading(false);
-    },
-    {
-      enableHighAccuracy: true,
-      timeout: 12000,
-      maximumAge: 0,
-    }
-  );
-}, [showToast]);
-
-  // attribute table viewer state
-  const [tableOpen, setTableOpen] = useState(false);
-  const [tableLayerId, setTableLayerId] = useState<string | null>(null);
-  const [tableSearch, setTableSearch] = useState("");
-
-    // attribute table pagination
-    const [tablePage, setTablePage] = useState(1); // 1-based
-    const [tablePageSize, setTablePageSize] = useState(50); // tweak: 50/100/200/500
-
-    
-  // selection per layer (indices) -> controls FILTERING (what is shown on map)
-  const [selectedFeatureIdxByLayer, setSelectedFeatureIdxByLayer] = useState<Record<string, Set<number>>>({});
-
-  // per-layer per-feature color overrides
-  const [featureColorByLayer, setFeatureColorByLayer] = useState<Record<string, Record<number, string>>>({});
-
-  // attribute-table color picker (bulk applies)
-  const [tableColor, setTableColor] = useState(DEFAULT_TABLE_COLOR);
-
+  const [showBasemap, setShowBasemap] = useState(false);
   const abortersRef = useRef<Record<string, AbortController>>({});
 
   const [toast, setToast] = useState<ToastState>({ show: false });
-  function showToast(type: "success" | "error" | "info", message: string) {
+  const showToast = useCallback((type: "success" | "error" | "info", message: string) => {
     setToast({ show: true, type, message });
     window.setTimeout(() => setToast({ show: false }), 2200);
-  }
+  }, []);
+
+  /** ✅ RESIZE: left panel width (desktop only visually) */
+  const [panelWidth, setPanelWidth] = useState(380); // px
+  const resizingPanelRef = useRef(false);
+
+  /** ✅ RESIZE: dock/table height (desktop only visually; mobile uses fixed sheet) */
+  const [dockHeight, setDockHeight] = useState(320); // px
+  const resizingDockRef = useRef(false);
+
+  /** ✅ smoother resize (disable transitions while dragging + RAF throttle) */
+  const [isResizingPanel, setIsResizingPanel] = useState(false);
+  const [isResizingDock, setIsResizingDock] = useState(false);
+
+  const rafRef = useRef<number | null>(null);
+  const lastMoveRef = useRef<{ x: number; y: number } | null>(null);
+
+  /** ✅ detect mobile breakpoint (used for behavior, not just CSS) */
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 1280px)");
+    const on = () => setIsMobile(mq.matches);
+    on();
+    mq.addEventListener?.("change", on);
+    return () => mq.removeEventListener?.("change", on);
+  }, []);
+
+  // ✅ Narrow sidebar (desktop only) — controls stacked layout
+  const isNarrowSidebar = !isMobile && panelWidth <= 340;
+
+
+  // ✅ group open/close
+  const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>(() => {
+    const init: Record<string, boolean> = {};
+    GROUP_ORDER.forEach((g) => (init[g] = false)); // ✅ default collapsed on fresh load
+    return init;
+  });
+
+  // ✅ Accordion toggle (open one group, close others)
+  const toggleGroup = useCallback((key: GroupKey) => {
+    setGroupOpen((prev) => {
+      const nextOpen = !(prev[key] ?? true);
+
+      const next: Record<string, boolean> = {};
+      GROUP_ORDER.forEach((g) => (next[g] = false)); // close all
+      next[key] = nextOpen; // open (or close) clicked group
+
+      return next;
+    });
+  }, []);
+
+
+  useEffect(() => {
+    function applyMove(x: number, y: number) {
+      if (resizingPanelRef.current) {
+        const leftPad = 12;
+        const minW = 300;
+        const maxW = 520;
+        const next = Math.max(minW, Math.min(maxW, x - leftPad));
+        setPanelWidth(next);
+      }
+      if (resizingDockRef.current) {
+        const vh = window.innerHeight;
+        const minH = 180;
+        const maxH = Math.max(240, Math.floor(vh * 0.62));
+        const bottomPad = 12;
+        const next = Math.max(minH, Math.min(maxH, vh - y - bottomPad));
+        setDockHeight(next);
+      }
+    }
+    
+    function onMove(e: MouseEvent) {
+      lastMoveRef.current = { x: e.clientX, y: e.clientY };
+      if (rafRef.current != null) return;
+    
+      rafRef.current = window.requestAnimationFrame(() => {
+        rafRef.current = null;
+        const p = lastMoveRef.current;
+        if (!p) return;
+        applyMove(p.x, p.y);
+      });
+    }
+
+
+    function onUp() {
+      resizingPanelRef.current = false;
+      resizingDockRef.current = false;
+    
+      setIsResizingPanel(false);
+      setIsResizingDock(false);
+    
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
+  useEffect(() => {
+    function onTouchMove(e: TouchEvent) {
+      const t = e.touches[0];
+      if (!t) return;
+      if (resizingPanelRef.current) {
+        const leftPad = 12;
+        const minW = 300;
+        const maxW = 520;
+        const next = Math.max(minW, Math.min(maxW, t.clientX - leftPad));
+        setPanelWidth(next);
+        e.preventDefault();
+      }
+      if (resizingDockRef.current) {
+        const vh = window.innerHeight;
+        const minH = 180;
+        const maxH = Math.max(240, Math.floor(vh * 0.62));
+        const bottomPad = 12;
+        const next = Math.max(minH, Math.min(maxH, vh - t.clientY - bottomPad));
+        setDockHeight(next);
+        e.preventDefault();
+      }
+    }
+    function onTouchEnd() {
+      resizingPanelRef.current = false;
+      resizingDockRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("touchend", onTouchEnd);
+    window.addEventListener("touchcancel", onTouchEnd);
+    return () => {
+      window.removeEventListener("touchmove", onTouchMove as any);
+      window.removeEventListener("touchend", onTouchEnd as any);
+      window.removeEventListener("touchcancel", onTouchEnd as any);
+    };
+  }, []);
+
+  const beginResizePanel = useCallback(() => {
+    resizingPanelRef.current = true;
+    setIsResizingPanel(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, []);
+  
+  const beginResizeDock = useCallback(() => {
+    resizingDockRef.current = true;
+    setIsResizingDock(true);
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+  }, []);
+
+  useEffect(() => {
+    document.body.classList.toggle("resizingDock", isResizingDock);
+    document.body.classList.toggle("resizingPanel", isResizingPanel);
+    return () => {
+      document.body.classList.remove("resizingDock", "resizingPanel");
+    };
+  }, [isResizingDock, isResizingPanel]);
+
+  /** Helpers for draw order with pseudo layers */
+  const ensureInDrawOrder = useCallback((id: string, toTop = true) => {
+    setLayerDrawOrder((prev) => {
+      const next = prev.filter((x) => x !== id);
+      if (toTop) return [...next, id];
+      return [id, ...next];
+    });
+  }, []);
+
+  const removeFromDrawOrder = useCallback((id: string) => {
+    setLayerDrawOrder((prev) => prev.filter((x) => x !== id));
+  }, []);
+
+  // ✅ USER LOCATION
+  const [userLoc, setUserLoc] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
+  const [locLoading, setLocLoading] = useState(false);
+
+  // ✅ MEASURE TOOL
+  const [measureActive, setMeasureActive] = useState(false);
+  const [measureHover, setMeasureHover] = useState<{ lat: number; lng: number } | null>(null);
+  const [measureFixedTo, setMeasureFixedTo] = useState<{ lat: number; lng: number } | null>(null);
+
+  const requestUserLocation = useCallback(() => {
+    if (typeof window === "undefined") return;
+
+    if (!("geolocation" in navigator)) {
+      showToast("error", "Geolocation is not supported by this browser.");
+      return;
+    }
+
+    setLocLoading(true);
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        const accuracy = pos.coords.accuracy;
+
+        setUserLoc({ lat, lng, accuracy });
+        ensureInDrawOrder(MY_LOC_LAYER_ID, true);
+        setDesktopTab("selected");
+        showToast("success", "Location found.");
+        setLocLoading(false);
+      },
+      (err) => {
+        const msg =
+          err?.code === 1
+            ? "Location permission denied."
+            : err?.code === 2
+              ? "Location unavailable."
+              : "Location request timed out.";
+
+        showToast("error", msg);
+        setLocLoading(false);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: 0,
+      }
+    );
+  }, [showToast, ensureInDrawOrder]);
+
+  // ✅ attribute table
+  const [tableOpen, setTableOpen] = useState(true);
+  const [tableCollapsed, setTableCollapsed] = useState(true);
+  const [tableLayerId, setTableLayerId] = useState<string | null>(null);
+  const [tableSearch, setTableSearch] = useState("");
+
+  const [tablePage, setTablePage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState(50);
+
+  const [selectedFeatureIdxByLayer, setSelectedFeatureIdxByLayer] = useState<Record<string, Set<number>>>({});
+  const [featureColorByLayer, setFeatureColorByLayer] = useState<Record<string, Record<number, string>>>({});
+
+  const [tableColor, setTableColor] = useState(DEFAULT_TABLE_COLOR);
 
   const refreshList = useCallback(async () => {
     setLoadingList(true);
@@ -267,14 +527,14 @@ const requestUserLocation = useCallback(() => {
       const text = await r.text();
       const j: any = safeJsonParse(text);
       if (!j.ok) throw new Error(j.error || "Failed to load layers");
-  
+
       const rows: LayerRow[] = j.layers || [];
-  
+
       setLayerDrawOrder((prev) => {
         const valid = new Set(rows.map((r) => r.id));
-        return prev.filter((id) => valid.has(id));
+        return prev.filter((id) => id === MY_LOC_LAYER_ID || id === MEASURE_LAYER_ID || valid.has(id));
       });
-  
+
       setLayers((prev) => {
         const prevById = new Map(prev.map((p) => [p.id, p]));
         return rows.map((row) => {
@@ -292,7 +552,7 @@ const requestUserLocation = useCallback(() => {
           };
         });
       });
-  
+
       showToast("info", "Layers refreshed.");
     } catch (e: any) {
       showToast("error", e?.message ?? "Failed to load layers");
@@ -300,75 +560,101 @@ const requestUserLocation = useCallback(() => {
       setLoadingList(false);
       setBooting(false);
     }
-  }, []);
+  }, [showToast]);
 
-  const loadGeojson = useCallback(async (layerId: string, mode: "map" | "full" = "map") => {
-    abortersRef.current[layerId]?.abort();
-    const ac = new AbortController();
-    abortersRef.current[layerId] = ac;
+  const loadGeojson = useCallback(
+    async (layerId: string, mode: "map" | "full" = "map") => {
+      if (layerId === MY_LOC_LAYER_ID || layerId === MEASURE_LAYER_ID) return;
 
-    setLayers((prev) => prev.map((l) => (l.id === layerId ? { ...l, loading: true, error: undefined } : l)));
+      abortersRef.current[layerId]?.abort();
+      const ac = new AbortController();
+      abortersRef.current[layerId] = ac;
 
-    try {
-      const r = await fetch(`/api/layers/${layerId}/geojson?mode=${mode}`, {
-        cache: "no-store",
-        signal: ac.signal,
-      });
+      setLayers((prev) => prev.map((l) => (l.id === layerId ? { ...l, loading: true, error: undefined } : l)));
 
-      const text = await r.text();
-      const j: any = safeJsonParse(text);
-      if (j?.ok === false) throw new Error(j.error || "Failed to load GeoJSON");
+      try {
+        const r = await fetch(`/api/layers/${layerId}/geojson?mode=${mode}`, {
+          cache: "no-store",
+          signal: ac.signal,
+        });
 
-      const fc = coerceFeatureCollection(j);
-      if (!fc) throw new Error("API did not return a GeoJSON FeatureCollection.");
+        const text = await r.text();
+        const j: any = safeJsonParse(text);
+        if (j?.ok === false) throw new Error(j.error || "Failed to load GeoJSON");
 
-      setLayers((prev) =>
-        prev.map((l) =>
-          l.id === layerId
-            ? {
-                ...l,
-                geojson: fc,
-                loading: false,
-                _geoMode: mode,
-              }
-            : l
-        )
-      );
+        const fc = coerceFeatureCollection(j);
+        if (!fc) throw new Error("API did not return a GeoJSON FeatureCollection.");
 
-      // keep selection valid after reload
-      setSelectedFeatureIdxByLayer((prev) => {
-        const cur = prev[layerId] ?? new Set<number>();
-        const max = Array.isArray(fc?.features) ? fc.features.length : 0;
-        return { ...prev, [layerId]: clampSelected(cur, max) };
-      });
+        setLayers((prev) =>
+          prev.map((l) =>
+            l.id === layerId
+              ? {
+                  ...l,
+                  geojson: fc,
+                  loading: false,
+                  _geoMode: mode,
+                }
+              : l
+          )
+        );
 
-      // keep per-feature colors valid after reload
-      setFeatureColorByLayer((prev) => {
-        const cur = prev[layerId] ?? {};
-        const max = Array.isArray(fc?.features) ? fc.features.length : 0;
-        const next: Record<number, string> = {};
-        for (const k of Object.keys(cur)) {
-          const idx = Number(k);
-          if (Number.isFinite(idx) && idx >= 0 && idx < max) next[idx] = cur[idx];
-        }
-        return { ...prev, [layerId]: next };
-      });
-    } catch (e: any) {
-      if (e?.name === "AbortError") return;
-      const msg = e?.message ?? "Failed to load";
-      setLayers((prev) =>
-        prev.map((l) => (l.id === layerId ? { ...l, loading: false, error: msg } : l))
-      );
-      showToast("error", msg);
-    }
-  }, []);
+        setSelectedFeatureIdxByLayer((prev) => {
+          const cur = prev[layerId] ?? new Set<number>();
+          const max = Array.isArray(fc?.features) ? fc.features.length : 0;
+          return { ...prev, [layerId]: clampSelected(cur, max) };
+        });
+
+        setFeatureColorByLayer((prev) => {
+          const cur = prev[layerId] ?? {};
+          const max = Array.isArray(fc?.features) ? fc.features.length : 0;
+          const next: Record<number, string> = {};
+          for (const k of Object.keys(cur)) {
+            const idx = Number(k);
+            if (Number.isFinite(idx) && idx >= 0 && idx < max) next[idx] = cur[idx];
+          }
+          return { ...prev, [layerId]: next };
+        });
+      } catch (e: any) {
+        if (e?.name === "AbortError") return;
+        const msg = e?.message ?? "Failed to load";
+        setLayers((prev) => prev.map((l) => (l.id === layerId ? { ...l, loading: false, error: msg } : l)));
+        showToast("error", msg);
+      }
+    },
+    [showToast]
+  );
 
   const toggleLayer = useCallback(
     async (layerId: string, nextVisible: boolean) => {
-      // 1) update visible state
+      if (layerId === MY_LOC_LAYER_ID) {
+        if (!nextVisible) {
+          setUserLoc(null);
+          removeFromDrawOrder(MY_LOC_LAYER_ID);
+          showToast("info", "My Location removed.");
+        } else {
+          if (!userLoc) {
+            showToast("info", "Click the location button to get your location first.");
+            return;
+          }
+          ensureInDrawOrder(MY_LOC_LAYER_ID, true);
+        }
+        return;
+      }
+      if (layerId === MEASURE_LAYER_ID) {
+        if (!nextVisible) {
+          setMeasureActive(false);
+          setMeasureHover(null);
+          setMeasureFixedTo(null);
+          removeFromDrawOrder(MEASURE_LAYER_ID);
+          showToast("info", "Measure removed.");
+        } else {
+          ensureInDrawOrder(MEASURE_LAYER_ID, true);
+        }
+        return;
+      }
+
       setLayers((prev) => prev.map((l) => (l.id === layerId ? { ...l, visible: nextVisible } : l)));
 
-      // 2) update draw order (first clicked = bottom; newest visible = top)
       setLayerDrawOrder((prev) => {
         if (nextVisible) {
           const without = prev.filter((id) => id !== layerId);
@@ -377,12 +663,10 @@ const requestUserLocation = useCallback(() => {
         return prev.filter((id) => id !== layerId);
       });
 
-      // 3) lazy-load / upgrade geojson if needed (use latest layers via ref)
       if (nextVisible) {
         const cur = layersRef.current.find((l) => l.id === layerId);
         if (!cur) return;
 
-        // ✅ for visibility, prefer FULL so table is always ready
         if (!cur.geojson && !cur.loading) {
           await loadGeojson(layerId, "full");
           return;
@@ -392,7 +676,7 @@ const requestUserLocation = useCallback(() => {
         }
       }
     },
-    [loadGeojson]
+    [loadGeojson, ensureInDrawOrder, removeFromDrawOrder, showToast, userLoc]
   );
 
   const selectFiltered = useCallback(
@@ -400,13 +684,26 @@ const requestUserLocation = useCallback(() => {
       const ids = new Set(filteredIds);
       setLayers((prev) => prev.map((l) => (ids.has(l.id) ? { ...l, visible: next } : l)));
 
-      // ✅ if turning on, load FULL (so table works immediately)
       if (next) {
         const snapshot = layersRef.current;
-        const missing = snapshot.filter((l) => ids.has(l.id) && (!l.geojson || l._geoMode !== "full") && !l.loading).slice(0, 10);
+        const missing = snapshot
+          .filter((l) => ids.has(l.id) && (!l.geojson || l._geoMode !== "full") && !l.loading)
+          .slice(0, 10);
         missing.forEach((m) => loadGeojson(m.id, "full"));
+
+        setLayerDrawOrder((prev) => {
+          const base = prev.filter((id) => id === MY_LOC_LAYER_ID || id === MEASURE_LAYER_ID || !ids.has(id));
+          const add = filteredIds.filter((id) => ids.has(id));
+          const merged = [...base, ...add];
+          const out: string[] = [];
+          for (const id of merged) {
+            const i = out.indexOf(id);
+            if (i !== -1) out.splice(i, 1);
+            out.push(id);
+          }
+          return out;
+        });
       } else {
-        // if turning off, remove from draw order
         setLayerDrawOrder((prev) => prev.filter((id) => !ids.has(id)));
       }
     },
@@ -415,19 +712,47 @@ const requestUserLocation = useCallback(() => {
 
   const clearAll = useCallback(() => {
     setLayers((prev) => prev.map((l) => ({ ...l, visible: false })));
-    setLayerDrawOrder([]);
+    setLayerDrawOrder((prev) => prev.filter((id) => id === MY_LOC_LAYER_ID || id === MEASURE_LAYER_ID));
   }, []);
 
-    // reset pagination when layer/search changes or when table opens
-    useEffect(() => {
-      if (!tableOpen) return;
-      setTablePage(1);
-    }, [tableOpen, tableLayerId, tableSearch]);
-  
+  const moveLayer = useCallback((layerId: string, dir: "top" | "up" | "down" | "bottom") => {
+    setLayerDrawOrder((prev) => {
+      const cur = prev.length ? [...prev] : [];
+      const idx0 = cur.indexOf(layerId);
+      if (idx0 === -1) cur.push(layerId);
+
+      const idx = cur.indexOf(layerId);
+      if (idx === -1) return cur;
+
+      cur.splice(idx, 1);
+
+      if (dir === "top") cur.push(layerId);
+      else if (dir === "bottom") cur.unshift(layerId);
+      else if (dir === "up") cur.splice(Math.min(cur.length, idx + 1), 0, layerId);
+      else cur.splice(Math.max(0, idx - 1), 0, layerId);
+
+      return cur;
+    });
+  }, []);
+
+
+  useEffect(() => {
+    const t = window.setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
+    return () => window.clearTimeout(t);
+  }, [panelWidth, dockHeight, tableCollapsed, isMobile, mobilePanelOpen]);
+
+  useEffect(() => {
+    if (!tableOpen) return;
+    setTablePage(1);
+  }, [tableOpen, tableLayerId, tableSearch]);
+
   const openAttributeTable = useCallback(
     (layerId: string) => {
+      if (layerId === MY_LOC_LAYER_ID || layerId === MEASURE_LAYER_ID) return;
+
       setTableLayerId(layerId);
       setTableOpen(true);
+      setTableCollapsed(false);
       setTableColor(DEFAULT_TABLE_COLOR);
       setTableSearch("");
 
@@ -495,38 +820,119 @@ const requestUserLocation = useCallback(() => {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-  
+
     const base = !q
       ? layers
-      : layers.filter((l) =>
-          `${l.name} ${l.geom_type ?? ""} ${l.srid ?? ""}`
-            .toLowerCase()
-            .includes(q)
-        );
-  
-    // ✅ Alphabetical sort by layer name
-    return [...base].sort((a, b) => {
-      if (a.visible !== b.visible) return a.visible ? -1 : 1;
-      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-    });
+      : layers.filter((l) => `${l.name} ${l.geom_type ?? ""} ${l.srid ?? ""}`.toLowerCase().includes(q));
+
+    return [...base].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
   }, [layers, search]);
-  
 
   const filteredIds = useMemo(() => filtered.map((l) => l.id), [filtered]);
 
+  // ✅ GROUPED LIST (based on filtered/search result)
+const groupedFiltered = useMemo(() => {
+  const map = new Map<GroupKey, MapLayer[]>();
+
+  for (const l of filtered) {
+    const g = getLayerGroup(l.name) as GroupKey;
+    const arr = map.get(g) ?? [];
+    arr.push(l);
+    map.set(g, arr);
+  }
+
+  // sort inside each group
+  for (const [k, arr] of map.entries()) {
+    arr.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+    map.set(k, arr);
+  }
+
+  // output ordered groups (only those with items)
+  return GROUP_ORDER.map((k) => ({ key: k, items: map.get(k) ?? [] })).filter((g) => g.items.length > 0);
+}, [filtered]);
+
+  const measureTo = measureFixedTo ?? measureHover;
+
+  const userLocGeojson = useMemo(() => {
+    if (!userLoc) return null;
+
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "me",
+          properties: {
+            __fid: "me",
+            __color: "#ef4444",
+            __marker: "dot",
+            label: "My Location",
+            accuracy_m: userLoc.accuracy ?? null,
+          },
+          geometry: { type: "Point", coordinates: [userLoc.lng, userLoc.lat] },
+        },
+      ],
+    };
+  }, [userLoc]);
+
+  const measureLineGeojson = useMemo(() => {
+    if (!measureActive) return null;
+    if (!userLoc) return null;
+    if (!measureTo) return null;
+
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "measure-line",
+          properties: { __fid: "measure-line", __color: "#ef4444", label: "Distance" },
+          geometry: {
+            type: "LineString",
+            coordinates: [
+              [userLoc.lng, userLoc.lat],
+              [measureTo.lng, measureTo.lat],
+            ],
+          },
+        },
+        {
+          type: "Feature",
+          id: "measure-to",
+          properties: { __fid: "measure-to", __color: "#ef4444", __marker: "dot", label: "Destination" },
+          geometry: { type: "Point", coordinates: [measureTo.lng, measureTo.lat] },
+        },
+      ],
+    };
+  }, [measureActive, userLoc, measureTo]);
+
+  useEffect(() => {
+    if (measureLineGeojson) ensureInDrawOrder(MEASURE_LAYER_ID, true);
+    else removeFromDrawOrder(MEASURE_LAYER_ID);
+  }, [measureLineGeojson, ensureInDrawOrder, removeFromDrawOrder]);
+
+  useEffect(() => {
+    if (userLocGeojson) ensureInDrawOrder(MY_LOC_LAYER_ID, true);
+    else removeFromDrawOrder(MY_LOC_LAYER_ID);
+  }, [userLocGeojson, ensureInDrawOrder, removeFromDrawOrder]);
+
+  const measureDistance = useMemo(() => {
+    if (!userLoc || !measureTo) return null;
+    return haversineMeters({ lat: userLoc.lat, lng: userLoc.lng }, { lat: measureTo.lat, lng: measureTo.lng });
+  }, [userLoc, measureTo]);
+
   const visibleLayers = useMemo(() => {
     const byId = new Map(layers.map((l) => [l.id, l] as const));
+    const orderedReal: MapLayer[] = [];
 
-    const ordered: MapLayer[] = [];
     for (const id of layerDrawOrder) {
       const l = byId.get(id);
-      if (l?.visible && l.geojson) ordered.push(l);
+      if (l?.visible && l.geojson) orderedReal.push(l);
     }
     for (const l of layers) {
-      if (l.visible && l.geojson && !layerDrawOrder.includes(l.id)) ordered.push(l);
+      if (l.visible && l.geojson && !layerDrawOrder.includes(l.id)) orderedReal.push(l);
     }
 
-    return ordered.map((l) => {
+    const processed = orderedReal.map((l) => {
       const fc = l.geojson;
       const features = Array.isArray(fc?.features) ? fc.features : [];
       const selected = selectedFeatureIdxByLayer[l.id] ?? new Set<number>();
@@ -549,25 +955,155 @@ const requestUserLocation = useCallback(() => {
 
       return { ...l, geojson: { ...fc, features: nextFeatures } };
     });
+
+    return processed;
   }, [layers, layerDrawOrder, selectedFeatureIdxByLayer, featureColorByLayer]);
+
+  const mapLayersInput = useMemo(() => {
+    type Input = {
+      id: string;
+      name?: string;
+      color?: string;
+      geom_type?: string | null;
+      geojson: any;
+      orderNo?: number;
+    };
+
+    const byReal = new Map(
+      visibleLayers.map((v) => [
+        v.id,
+        {
+          id: v.id,
+          name: v.name,
+          color: DEFAULT_LAYER_COLOR,
+          geom_type: v.geom_type,
+          geojson: v.geojson,
+        } as Input,
+      ])
+    );
+
+    const pseudo: Record<string, Input | null> = {
+      [MY_LOC_LAYER_ID]: userLocGeojson
+        ? {
+            id: MY_LOC_LAYER_ID,
+            name: "My Location",
+            color: "#ef4444",
+            geom_type: "Point",
+            geojson: userLocGeojson,
+          }
+        : null,
+      [MEASURE_LAYER_ID]: measureLineGeojson
+        ? {
+            id: MEASURE_LAYER_ID,
+            name: "Measure",
+            color: "#ef4444",
+            geom_type: "LineString",
+            geojson: measureLineGeojson,
+          }
+        : null,
+    };
+
+    const orderedIds: string[] = [];
+
+    for (const id of layerDrawOrder) {
+      if (byReal.has(id)) orderedIds.push(id);
+      else if (pseudo[id]) orderedIds.push(id);
+    }
+
+    for (const v of visibleLayers) if (!orderedIds.includes(v.id)) orderedIds.push(v.id);
+    if (pseudo[MY_LOC_LAYER_ID] && !orderedIds.includes(MY_LOC_LAYER_ID)) orderedIds.push(MY_LOC_LAYER_ID);
+    if (pseudo[MEASURE_LAYER_ID] && !orderedIds.includes(MEASURE_LAYER_ID)) orderedIds.push(MEASURE_LAYER_ID);
+
+    const out: Input[] = [];
+    orderedIds.forEach((id, i) => {
+      if (byReal.has(id)) out.push({ ...(byReal.get(id) as any), orderNo: i + 1 });
+      else if (pseudo[id]) out.push({ ...(pseudo[id] as any), orderNo: i + 1 });
+    });
+
+    return out;
+  }, [visibleLayers, userLocGeojson, measureLineGeojson, layerDrawOrder]);
 
   const visibleCount = useMemo(() => layers.filter((l) => l.visible).length, [layers]);
   const loadedCount = useMemo(() => layers.filter((l) => l.visible && l.geojson).length, [layers]);
 
   const layerOrderNumberById = useMemo(() => {
     const byId = new Map(layers.map((l) => [l.id, l] as const));
-    const visibleOrderedIds: string[] = [];
+    const activeIds: string[] = [];
 
-    for (const id of layerDrawOrder) if (byId.get(id)?.visible) visibleOrderedIds.push(id);
-    for (const l of layers) if (l.visible && !visibleOrderedIds.includes(l.id)) visibleOrderedIds.push(l.id);
+    for (const id of layerDrawOrder) {
+      if (id === MY_LOC_LAYER_ID && userLocGeojson) activeIds.push(id);
+      else if (id === MEASURE_LAYER_ID && measureLineGeojson) activeIds.push(id);
+      else if (byId.get(id)?.visible) activeIds.push(id);
+    }
+    for (const l of layers) if (l.visible && !activeIds.includes(l.id)) activeIds.push(l.id);
+    if (userLocGeojson && !activeIds.includes(MY_LOC_LAYER_ID)) activeIds.push(MY_LOC_LAYER_ID);
+    if (measureLineGeojson && !activeIds.includes(MEASURE_LAYER_ID)) activeIds.push(MEASURE_LAYER_ID);
 
+    const topToBottom = [...activeIds].reverse();
     const m: Record<string, number> = {};
-    visibleOrderedIds.forEach((id, i) => (m[id] = i + 1));
+    topToBottom.forEach((id, i) => (m[id] = i + 1));
     return m;
-  }, [layers, layerDrawOrder]);
+  }, [layers, layerDrawOrder, userLocGeojson, measureLineGeojson]);
 
   const hasAnyVisibleFiltered = useMemo(() => filtered.some((l) => l.visible), [filtered]);
   const hasAllVisibleFiltered = useMemo(() => filtered.length > 0 && filtered.every((l) => l.visible), [filtered]);
+
+  const selectedLayersOrdered = useMemo(() => {
+    const byId = new Map(layers.map((l) => [l.id, l] as const));
+
+    const idsBottomToTop: string[] = [];
+
+    for (const id of layerDrawOrder) {
+      if (id === MY_LOC_LAYER_ID) {
+        if (userLocGeojson) idsBottomToTop.push(id);
+        continue;
+      }
+      if (id === MEASURE_LAYER_ID) {
+        if (measureLineGeojson) idsBottomToTop.push(id);
+        continue;
+      }
+      const l = byId.get(id);
+      if (l?.visible) idsBottomToTop.push(id);
+    }
+
+    for (const l of layers) {
+      if (l.visible && !idsBottomToTop.includes(l.id)) idsBottomToTop.push(l.id);
+    }
+    if (userLocGeojson && !idsBottomToTop.includes(MY_LOC_LAYER_ID)) idsBottomToTop.push(MY_LOC_LAYER_ID);
+    if (measureLineGeojson && !idsBottomToTop.includes(MEASURE_LAYER_ID)) idsBottomToTop.push(MEASURE_LAYER_ID);
+
+    const topToBottom = [...idsBottomToTop].reverse();
+
+    return topToBottom
+      .map((id) => {
+        if (id === MY_LOC_LAYER_ID) {
+          return {
+            id: MY_LOC_LAYER_ID,
+            name: "My Location",
+            geom_type: "Point" as any,
+            srid: null as any,
+            visible: true,
+            geojson: userLocGeojson,
+            loading: locLoading,
+            _geoMode: "map" as any,
+          } as MapLayer;
+        }
+        if (id === MEASURE_LAYER_ID) {
+          return {
+            id: MEASURE_LAYER_ID,
+            name: "Measure",
+            geom_type: "LineString" as any,
+            srid: null as any,
+            visible: true,
+            geojson: measureLineGeojson,
+            loading: false,
+            _geoMode: "map" as any,
+          } as MapLayer;
+        }
+        return byId.get(id) as MapLayer;
+      })
+      .filter(Boolean);
+  }, [layers, layerDrawOrder, userLocGeojson, measureLineGeojson, locLoading]);
 
   const tableLayer = useMemo(() => layers.find((l) => l.id === tableLayerId) ?? null, [layers, tableLayerId]);
 
@@ -610,7 +1146,6 @@ const requestUserLocation = useCallback(() => {
     const end = start + tablePageSize;
     return tableFilteredRows.slice(start, end);
   }, [tableFilteredRows, tablePageSafe, tablePageSize]);
-
 
   const tableMax = tableData.rows.length;
 
@@ -670,61 +1205,25 @@ const requestUserLocation = useCallback(() => {
       })
       .join("|");
 
-      const locSig = userLoc ? `${userLoc.lat.toFixed(6)},${userLoc.lng.toFixed(6)}` : "none";
-      return `${visibleLayers.length}-${hashString(selSig)}-${hashString(clrSig)}-${hashString(locSig)}`;
-  }, [visibleLayers.length, selectedFeatureIdxByLayer, featureColorByLayer]);
+    const locSig = userLoc ? `${userLoc.lat.toFixed(6)},${userLoc.lng.toFixed(6)}` : "none";
+    const measureSig = `${measureActive ? "1" : "0"}|${measureTo ? `${measureTo.lat.toFixed(6)},${measureTo.lng.toFixed(6)}` : "none"}`;
 
-  const userLocGeojson = useMemo(() => {
-    if (!userLoc) return null;
-  
-    return {
-      type: "FeatureCollection",
-      features: [
-  {
-    type: "Feature",
-    id: "me",
-    properties: { __color: "#ef4444", __marker: "dot", label: "My Location", accuracy_m: userLoc.accuracy ?? null },
-    geometry: { type: "Point", coordinates: [userLoc.lng, userLoc.lat] },
-  },
-  ...(userLoc.accuracy
-    ? [{
-        type: "Feature",
-        id: "me-accuracy",
-        properties: { __color: "#ef4444", __marker: "accuracy" },
-        geometry: { type: "Point", coordinates: [userLoc.lng, userLoc.lat] },
-      }]
-    : []),
-]
-    };
-  }, [userLoc]);
-
-  const loadingAny = useMemo(() => layers.some((l) => l.loading), [layers]);
-  const loadingCount = useMemo(() => layers.filter((l) => l.loading).length, [layers]);
-  const showHUD = loadingCount >= 2;
-
-  const colorCountForTableLayer = useMemo(() => Object.keys(tableColorOverrides).length, [tableColorOverrides]);
-
+    return `${mapLayersInput.length}-${hashString(selSig)}-${hashString(clrSig)}-${hashString(locSig)}-${hashString(measureSig)}`;
+  }, [mapLayersInput.length, selectedFeatureIdxByLayer, featureColorByLayer, userLoc, measureActive, measureTo]);
 
   const overlayTitle = useMemo(() => {
     if (booting) return "Loading layers…";
     if (loadingList) return "Refreshing layers…";
-    if (loadingAny) return loadingCount >= 2 ? `Loading layers (${loadingCount})…` : "Loading layer…";
     return "";
-  }, [booting, loadingList, loadingAny, loadingCount]);
-  
-  const showOverlay = booting || loadingList || loadingAny;
+  }, [booting, loadingList]);
 
+  const showOverlay = booting || loadingList;
 
   const pickAllRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!pickAllRef.current) return;
     pickAllRef.current.indeterminate = !allFilteredSelected && someFilteredSelected;
   }, [allFilteredSelected, someFilteredSelected]);
-
-  const reloadVisibleLayers = useCallback(async () => {
-    const ids = layersRef.current.filter((l) => l.visible).map((l) => l.id);
-    for (const id of ids) await loadGeojson(id, "map");
-  }, [loadGeojson]);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const profileWrapRef = useRef<HTMLDivElement | null>(null);
@@ -737,6 +1236,76 @@ const requestUserLocation = useCallback(() => {
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
+
+  const handleFeatureClick = useCallback(
+    (fid: string) => {
+      if (fid !== "me") return;
+      if (!userLoc) {
+        showToast("info", "Click the location button first.");
+        return;
+      }
+      setMeasureActive(true);
+      setMeasureFixedTo(null);
+      setMeasureHover(null);
+      showToast("info", "Move your mouse on the map, then click to set destination.");
+    },
+    [userLoc, showToast]
+  );
+
+  const onMapMouseMove = useCallback(
+    (lat: number, lng: number) => {
+      if (!measureActive) return;
+      if (measureFixedTo) return;
+      setMeasureHover({ lat, lng });
+    },
+    [measureActive, measureFixedTo]
+  );
+
+  const onMapClick = useCallback(
+    (lat: number, lng: number) => {
+      if (!measureActive) return;
+      if (!userLoc) return;
+      setMeasureFixedTo({ lat, lng });
+      const d = haversineMeters({ lat: userLoc.lat, lng: userLoc.lng }, { lat, lng });
+      showToast("success", `Distance: ${formatDistance(d)}`);
+    },
+    [measureActive, userLoc, showToast]
+  );
+
+  const clearMeasure = useCallback(() => {
+    setMeasureActive(false);
+    setMeasureHover(null);
+    setMeasureFixedTo(null);
+  }, []);
+
+  const selectedCountForLayer = useCallback(
+    (layerId: string) => selectedFeatureIdxByLayer[layerId]?.size ?? 0,
+    [selectedFeatureIdxByLayer]
+  );
+
+  const addLayerFromAllList = useCallback(
+    async (layerId: string) => {
+      const cur = layersRef.current.find((l) => l.id === layerId);
+      if (!cur) return;
+      if (cur.visible) {
+        openAttributeTable(layerId);
+        return;
+      }
+      await toggleLayer(layerId, true);
+      setDesktopTab("selected");
+    },
+    [toggleLayer, openAttributeTable]
+  );
+
+  /** ✅ Mobile: don’t let “Layers” floating button cover the table */
+  const showMobileFab = useMemo(() => {
+    if (!isMobile) return false;
+    // Hide FAB when attribute table sheet is open/expanded to avoid overlap
+    if (!tableCollapsed && tableLayerId) return false;
+    // Also hide when layers sheet is already open
+    if (mobilePanelOpen) return false;
+    return true;
+  }, [isMobile, tableCollapsed, tableLayerId, mobilePanelOpen]);
 
   return (
     <div className="shell">
@@ -754,60 +1323,54 @@ const requestUserLocation = useCallback(() => {
       <style>{`
         :root{
           --bg0:#ffffff;
-          --bg1:#f6f8fb;
+          --bg1:#f6f7fb;
 
           --panel:#ffffff;
-          --panel2:#ffffff;
 
           --text:#0b1220;
-          --muted: rgba(11,18,32,.60);
+          --muted: rgba(11,18,32,.58);
 
           --stroke: rgba(11,18,32,.10);
-          --stroke2: rgba(11,18,32,.18);
+          --stroke2: rgba(11,18,32,.16);
 
           --shadow: 0 14px 40px rgba(11,18,32,.10);
           --shadow2: 0 30px 90px rgba(11,18,32,.14);
 
           --primary:#0f7a3a;
-          --primaryBg: rgba(15,122,58,.12);
+          --primaryBg: rgba(15,122,58,.10);
 
           --blue:#1166cc;
           --blueBg: rgba(17,102,204,.10);
 
           --danger:#d92d20;
-          --dangerBg: rgba(217,45,32,.12);
-
-          --good:#12a150;
-          --goodBg: rgba(18,161,80,.12);
+          --dangerBg: rgba(217,45,32,.10);
         }
 
         html, body { height:100%; margin:0; }
-
         html, body{
-          font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+          font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
             "Apple Color Emoji","Segoe UI Emoji";
           -webkit-font-smoothing: antialiased;
           -moz-osx-font-smoothing: grayscale;
         }
-
         body{
           color: var(--text);
           overflow:hidden;
           background:
-            radial-gradient(900px 560px at 14% 0%, rgba(15,122,58,.10), transparent 60%),
-            radial-gradient(900px 560px at 88% 12%, rgba(17,102,204,.10), transparent 60%),
+            radial-gradient(900px 560px at 14% 0%, rgba(15,122,58,.08), transparent 60%),
+            radial-gradient(900px 560px at 88% 12%, rgba(17,102,204,.08), transparent 60%),
             linear-gradient(180deg, var(--bg0), var(--bg1));
         }
-
         *{ box-sizing:border-box; }
-        ::selection{ background: rgba(15,122,58,.18); }
+        b{ font-weight: 650; }
+        ::selection{ background: rgba(15,122,58,.16); }
 
         .shell{ height:100vh; width:100%; display:flex; flex-direction:column; }
 
         .ring{
           display:inline-block;
           border-radius: 999px;
-          border: 2px solid rgba(11,18,32,.16);
+          border: 2px solid rgba(11,18,32,.14);
           border-top-color: var(--blue);
           box-shadow: 0 0 0 6px var(--blueBg);
           animation: spin .75s linear infinite;
@@ -823,49 +1386,11 @@ const requestUserLocation = useCallback(() => {
         }
         @keyframes shimmer{ 0%{ background-position: 200% 0; } 100%{ background-position: -200% 0; } }
 
-        .bootOverlay{
-          position: fixed; inset: 0;
-          z-index: 50000;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          background:
-            radial-gradient(900px 600px at 30% 20%, rgba(15,122,58,.12), transparent 60%),
-            radial-gradient(900px 600px at 70% 80%, rgba(17,102,204,.10), transparent 60%),
-            rgba(255,255,255,.86);
-          backdrop-filter: blur(18px);
-        }
-        .bootCard{
-          width: min(520px, 92vw);
-          padding: 18px;
-          border-radius: 22px;
-          border: 1px solid var(--stroke);
-          background: rgba(255,255,255,.92);
-          box-shadow: var(--shadow2);
-          display:flex;
-          gap:14px;
-          align-items:center;
-        }
-        .bootIcon{
-          width: 46px; height: 46px;
-          border-radius: 16px;
-          border: 1px solid rgba(11,18,32,.10);
-          background:
-            radial-gradient(18px 18px at 35% 35%, rgba(15,122,58,.28), transparent 70%),
-            radial-gradient(18px 18px at 70% 70%, rgba(17,102,204,.22), transparent 70%),
-            rgba(255,255,255,.92);
-          display:flex; align-items:center; justify-content:center;
-          box-shadow: 0 18px 44px rgba(11,18,32,.12);
-        }
-        .bootText{ display:flex; flex-direction:column; gap:8px; flex:1; min-width:0; }
-        .bootLine{ display:flex; gap:10px; align-items:center; }
-        .bootTitle{ font-weight: 1000; letter-spacing: -.35px; white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
-
         .topBar{
-          height: 58px;
+          height: 56px;
           padding: 0 12px;
           border-bottom: 1px solid var(--stroke);
-          background: rgba(255,255,255,.88);
+          background: rgba(255,255,255,.86);
           backdrop-filter: blur(14px);
           display:flex;
           align-items:center;
@@ -873,28 +1398,24 @@ const requestUserLocation = useCallback(() => {
           gap:10px;
           position: relative;
           z-index: 70000;
-          overflow: visible;
         }
         .brand{ display:flex; align-items:center; gap:10px; min-width:0; }
         .appIcon{
           width: 36px; height: 36px;
           border-radius: 14px;
           border: 1px solid rgba(11,18,32,.10);
-          background:
-            radial-gradient(14px 14px at 30% 30%, rgba(15,122,58,.22), transparent 70%),
-            radial-gradient(14px 14px at 70% 70%, rgba(17,102,204,.20), transparent 70%),
-            rgba(255,255,255,.92);
+          background: rgba(255,255,255,.92);
           box-shadow: 0 16px 40px rgba(11,18,32,.10);
           display:flex; align-items:center; justify-content:center;
         }
         .titleWrap{ display:flex; flex-direction:column; gap:1px; min-width:0; }
-        .title{ font-size: 16px; font-weight: 1000; letter-spacing: -.25px; line-height: 1.1; white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
-        .subtitle{ font-size: 11px; font-weight: 900; color: var(--muted); white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
+        .title{ font-size: 14px; font-weight: 650; letter-spacing: -.2px; line-height: 1.1; white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
+        .subtitle{ font-size: 11px; font-weight: 520; color: var(--muted); white-space:nowrap; overflow:hidden; text-overflow: ellipsis; }
 
         .pill{
           font-size: 11px;
-          font-weight: 600;
-          color: rgba(11,18,32,.74);
+          font-weight: 520;
+          color: rgba(11,18,32,.72);
           border: 1px solid var(--stroke);
           padding: 6px 10px;
           border-radius: 999px;
@@ -909,7 +1430,7 @@ const requestUserLocation = useCallback(() => {
           border: 1px solid var(--stroke);
           background: rgba(255,255,255,.92);
           color: var(--text);
-          font-weight: 650;
+          font-weight: 560;
           cursor: pointer;
           display:inline-flex;
           align-items:center;
@@ -927,17 +1448,17 @@ const requestUserLocation = useCallback(() => {
         }
         .btn:active{ transform: translateY(0); }
         .btn:focus-visible{
-          outline: 3px solid rgba(15,122,58,.22);
+          outline: 3px solid rgba(15,122,58,.20);
           outline-offset: 2px;
         }
         .btn[disabled]{ opacity: .55; cursor: not-allowed; transform:none; box-shadow:none; }
         .btnPrimary{
-          border-color: rgba(15,122,58,.28);
-          background: linear-gradient(180deg, rgba(15,122,58,.10), rgba(255,255,255,.92));
+          border-color: rgba(15,122,58,.24);
+          background: linear-gradient(180deg, rgba(15,122,58,.08), rgba(255,255,255,.92));
         }
         .btnDanger{
-          border-color: rgba(217,45,32,.25);
-          background: linear-gradient(180deg, rgba(217,45,32,.08), rgba(255,255,255,.92));
+          border-color: rgba(217,45,32,.22);
+          background: linear-gradient(180deg, rgba(217,45,32,.07), rgba(255,255,255,.92));
         }
         .btnGhost{ background: rgba(255,255,255,.92); }
         .iconBtn{
@@ -959,12 +1480,13 @@ const requestUserLocation = useCallback(() => {
           flex:1;
           min-height:0;
           display:grid;
-          grid-template-columns: minmax(320px, 410px) 1fr;
+          grid-template-columns: 1fr;
           gap: 12px;
           padding: 12px;
+          position: relative;
         }
 
-        .panel, .mapCard{
+        .panel, .mapStack{
           border: 1px solid var(--stroke);
           border-radius: 20px;
           background: rgba(255,255,255,.92);
@@ -973,6 +1495,57 @@ const requestUserLocation = useCallback(() => {
           flex-direction:column;
           min-height:0;
           overflow:hidden;
+        }
+
+        /* ✅ Desktop split layout (resizable) */
+        .split{
+          flex:1;
+          min-height:0;
+          display:grid;
+          grid-template-columns: var(--panelW) 10px 1fr;
+          gap: 0;
+        }
+        .split > .panel{ grid-column: 1; }
+        .split > .splitterWrap{ grid-column: 2; display:flex; align-items:stretch; justify-content:center; }
+        .split > .mapStack{ grid-column: 3; }
+
+        .splitter{
+          width: 10px;
+          cursor: col-resize;
+          position: relative;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        }
+        .splitter::before{
+          content:"";
+          width: 4px;
+          height: 100%;
+          border-radius: 999px;
+          background: rgba(11,18,32,.08);
+          transition: background .15s ease;
+        }
+        .splitter:hover::before{
+          background: rgba(15,122,58,.22);
+        }
+        .splitterGrip{
+          position:absolute;
+          width: 8px;
+          height: 52px;
+          border-radius: 999px;
+          border: 1px solid rgba(11,18,32,.10);
+          background: rgba(255,255,255,.92);
+          box-shadow: 0 12px 26px rgba(11,18,32,.10);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          opacity: .85;
+        }
+        .splitterDots{
+          width: 3px;
+          height: 24px;
+          border-radius: 999px;
+          background: linear-gradient(180deg, rgba(11,18,32,.18), rgba(11,18,32,.04));
         }
 
         .panelHead{
@@ -984,15 +1557,29 @@ const requestUserLocation = useCallback(() => {
         }
 
         .headRow{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
-        .headLeft{ display:flex; align-items:center; gap:10px; min-width:0; }
+        .headLeft{ display:flex; align-items:center; gap:10px; min-width:0; flex-wrap:wrap; }
         .sectionTitle{
-          font-size: 15px;
-          font-weight: 700;
-          letter-spacing: -0.15px;
+          font-size: 13px;
+          font-weight: 650;
+          letter-spacing: -0.12px;
           display:flex;
           align-items:center;
           gap:10px;
         }
+
+        /* ✅ Apple-like compact toolbar in header (fixes clutter in circled area) */
+        .toolbar{
+          display:flex;
+          gap:8px;
+          align-items:center;
+          padding: 6px;
+          border: 1px solid var(--stroke);
+          border-radius: 16px;
+          background: rgba(11,18,32,.03);
+        }
+        .toolbar .iconBtn{ width: 38px; height: 38px; border-radius: 14px; }
+        .toolbar .btn{ box-shadow:none; transform:none; }
+        .toolbar .btn:hover{ transform:none; box-shadow:none; }
 
         .searchWrap{
           display:flex;
@@ -1004,82 +1591,186 @@ const requestUserLocation = useCallback(() => {
           background: rgba(255,255,255,.92);
         }
         .searchWrap:focus-within{
-          border-color: rgba(15,122,58,.35);
-          box-shadow: 0 0 0 5px rgba(15,122,58,.10);
+          border-color: rgba(15,122,58,.28);
+          box-shadow: 0 0 0 5px rgba(15,122,58,.08);
         }
         .searchInput{
           width:100%;
           border:0;
           outline:0;
           background:transparent;
-          font-weight: 600;
+          font-weight: 520;
           color: var(--text);
           font-size: 12px;
         }
 
-        .list{
-          overflow:auto;
+        .segWrap{
+          display:flex;
+          gap:6px;
+          padding: 6px;
+          border: 1px solid var(--stroke);
+          border-radius: 14px;
+          background: rgba(11,18,32,.03);
+          width: fit-content;
+        }
+        .seg{
+          border: 1px solid transparent;
+          background: transparent;
+          padding: 8px 10px;
+          border-radius: 12px;
+          font-size: 11px;
+          font-weight: 560;
+          cursor: pointer;
+          color: rgba(11,18,32,.72);
+          display:flex;
+          align-items:center;
+          gap:8px;
+        }
+        .seg.active{
+          background: rgba(255,255,255,.96);
+          border-color: rgba(11,18,32,.10);
+          box-shadow: 0 10px 24px rgba(11,18,32,.10);
+          color: rgba(11,18,32,.92);
+        }
+
+        .listWrap{
           flex:1;
           min-height:0;
+          overflow:auto;
           -webkit-overflow-scrolling: touch;
-          padding: 12px;
+          padding: 10px;
           display:flex;
           flex-direction:column;
+          gap:8px;
+        }
+
+        
+        .miniItem{
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
           gap:10px;
+          padding: 10px 10px;
+          border-radius: 14px;
+          border: 1px solid rgba(11,18,32,.08);
+          background: rgba(255,255,255,.92);
+          transition: transform .10s ease, border-color .15s ease, box-shadow .15s ease, background .15s ease;
+        }
+        .miniItem:hover{
+          border-color: rgba(15,122,58,.14);
+          box-shadow: 0 12px 30px rgba(11,18,32,.10);
+          transform: translateY(-1px);
+        }
+        .miniNameBtn{
+          border:0;
+          background: transparent;
+          cursor:pointer;
+          padding:0;
+          text-align:left;
+          min-width:0;
+          flex:1;
+          display:flex;
+          flex-direction:column;
+          gap:2px;
+        }
+        .miniName{
+          font-size: 11px;
+          font-weight: 620;
+          letter-spacing: -.08px;
+          white-space:nowrap;
+          overflow:hidden;
+          text-overflow: ellipsis;
+        }
+        .miniMeta{
+          font-size: 10px;
+          font-weight: 480;
+          color: rgba(11,18,32,.58);
+          white-space:nowrap;
+          overflow:hidden;
+          text-overflow: ellipsis;
         }
 
-        .card{
-          border: 1px solid rgba(11,18,32,.10);
-          border-radius: 18px;
-          padding: 12px;
-          background:
-            radial-gradient(520px 240px at 18% 0%, rgba(15,122,58,.10), transparent 60%),
-            radial-gradient(520px 240px at 85% 100%, rgba(17,102,204,.08), transparent 60%),
-            rgba(255,255,255,.94);
-          transition: transform .12s ease, box-shadow .15s ease, border-color .15s ease;
-          display:grid;
-          gap:10px;
-        }
-        .card:hover{ transform: translateY(-1px); border-color: rgba(15,122,58,.18); box-shadow: 0 16px 44px rgba(11,18,32,.12); }
-
-        .cardTop{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
-        .name{
-          font-weight: 650;
-          letter-spacing: -0.10px;
-          font-size: 12px;
-          line-height: 1.2;
-          word-break: break-word;
-        }
-        .meta{
-          font-size: 10.5px;
-          font-weight: 500;
-          color: rgba(11,18,32,.62);
-          margin-top: 4px;
+        /* ✅ Narrow sidebar layout: Title on top, buttons below */
+        .miniItem.stacked{
+          flex-direction: column;
+          align-items: stretch;
+          gap: 10px;
         }
 
-        .row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
-        .leftRow{ display:flex; align-items:center; gap:10px; min-width:0; }
-        .layerChk{ width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary); }
-
-        .statusDot{
-          width: 10px; height: 10px; border-radius: 999px;
-          border: 1px solid rgba(11,18,32,.16);
-          background: rgba(11,18,32,.08);
-          box-shadow: 0 0 0 8px rgba(11,18,32,.04);
+        .miniItem.stacked .miniNameBtn{
+          width: 100%;
         }
-        .statusDot.on{ background: rgba(18,161,80,.70); box-shadow: 0 0 0 8px rgba(18,161,80,.14); border-color: rgba(18,161,80,.28); }
-        .statusDot.loading{ background: rgba(17,102,204,.70); box-shadow: 0 0 0 8px rgba(17,102,204,.14); border-color: rgba(17,102,204,.28); }
+
+        /* allow name to take 2 lines instead of disappearing */
+        .miniItem.stacked .miniName{
+          white-space: normal;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;      /* ✅ 2 lines max */
+          -webkit-box-orient: vertical;
+        }
+
+        /* buttons become a second row */
+        .miniItem.stacked .miniActions{
+          width: 100%;
+          justify-content: flex-start;
+          flex-wrap: wrap;            /* ✅ wrap buttons if needed */
+          overflow: visible;          /* ✅ no horizontal hiding */
+          padding-top: 8px;
+          border-top: 1px dashed rgba(11,18,32,.12);
+        }
+
+        /* ✅ actions stay clean even if panel is narrow */
+          .miniActions{
+            display:flex;
+            align-items:center;
+            gap:8px;
+            flex: 0 0 auto;
+            flex-wrap: nowrap;
+            justify-content:flex-end;
+            overflow: visible;         /* ✅ no clipping */
+          }
+
+          .miniActions::-webkit-scrollbar{ display:none; } /* Chrome */
+
+
+        .badgeOn{
+          font-size: 10px;
+          font-weight: 600;
+          padding: 5px 8px;
+          border-radius: 999px;
+          border: 1px solid rgba(15,122,58,.20);
+          background: rgba(15,122,58,.10);
+          color: rgba(15,122,58,.92);
+          white-space:nowrap;
+        }
 
         .err{
           font-size: 11px;
-          font-weight: 950;
+          font-weight: 600;
           color: #7a0b1a;
-          background: rgba(217,45,32,.08);
-          border: 1px solid rgba(217,45,32,.16);
+          background: rgba(217,45,32,.07);
+          border: 1px solid rgba(217,45,32,.14);
           padding: 8px 10px;
           border-radius: 14px;
+          margin-top: 6px;
         }
 
+        .mapStack{
+          display:flex;
+          flex-direction:column;
+          min-height:0;
+          overflow:hidden;
+        }
+        .mapCard{
+          flex: 1;
+          min-height: 0;
+          display:flex;
+          flex-direction:column;
+          border-bottom: 1px solid var(--stroke);
+          overflow:hidden;
+        }
         .mapHead{
           padding: 12px;
           border-bottom: 1px solid var(--stroke);
@@ -1091,21 +1782,22 @@ const requestUserLocation = useCallback(() => {
           background: rgba(255,255,255,.92);
         }
         .mapTitle{
-          font-weight: 700;
-          letter-spacing: -.25px;
+          font-weight: 650;
+          letter-spacing: -.2px;
           display:flex;
           align-items:center;
           gap:10px;
-          font-size: 15px;
+          font-size: 13px;
+          flex-wrap:wrap;
         }
         .chip{
           font-size: 10.5px;
-          font-weight: 650;
+          font-weight: 520;
           padding: 6px 10px;
           border-radius: 999px;
           border: 1px solid var(--stroke);
           background: rgba(255,255,255,.92);
-          color: rgba(11,18,32,.78);
+          color: rgba(11,18,32,.76);
           display:inline-flex;
           align-items:center;
           gap:8px;
@@ -1114,33 +1806,467 @@ const requestUserLocation = useCallback(() => {
         .mapArea{ position:relative; flex:1; min-height:0; }
         .mapInner{ position:absolute; inset:0; border-radius: 18px; overflow:hidden; }
 
-        @media (max-width: 980px){
-          body{ overflow:hidden; }
-          .main{ grid-template-columns: 1fr; padding: 0; gap: 0; }
-          .panel{ display:none; }
-          .mapCard{ border:0; border-radius:0; box-shadow:none; background: transparent; }
-          .mapHead{ position: sticky; top: 0; z-index: 50; background: rgba(255,255,255,.92); backdrop-filter: blur(14px); }
-          .mapInner{ border-radius: 0; }
+        .dock{
+          flex: 0 0 auto;
+          display:flex;
+          flex-direction:column;
+          background: rgba(255,255,255,.92);
+          overflow:hidden;
+          position: relative;
         }
 
-        .fab{
-          position: fixed;
-          right: 14px;
-          bottom: 14px;
-          z-index: 9000;
-          width: 56px;
-          height: 56px;
-          border-radius: 20px;
-          border: 1px solid var(--stroke);
+        .dockResizer{
+          position:absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 10px;
+          cursor: row-resize;
+          z-index: 10;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        }
+        .dockResizer::before{
+          content:"";
+          width: 74px;
+          height: 4px;
+          border-radius: 999px;
+          background: rgba(11,18,32,.12);
+          transition: background .15s ease;
+        }
+        .dockResizer:hover::before{
+          background: rgba(15,122,58,.25);
+        }
+
+        .dockTop{
+          padding: 10px 12px;
+          border-bottom: 1px solid var(--stroke);
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:10px;
+          flex-wrap:wrap;
+          background: rgba(255,255,255,.94);
+        }
+        .dockTitle{
+          font-weight: 650;
+          letter-spacing: -.15px;
+          display:flex;
+          align-items:center;
+          gap:10px;
+          min-width:0;
+          white-space:nowrap;
+          overflow:hidden;
+          text-overflow: ellipsis;
+          font-size: 12px;
+        }
+
+        .dockBody{
+          height: var(--dockH);
+          min-height: 180px;
+          max-height: 62vh;
+          display:flex;
+          flex-direction:column;
+          overflow:hidden;
+          transition: height .18s ease;
+          will-change: height;
+        }
+
+        /* ✅ while resizing, remove transition so it tracks the pointer smoothly */
+        body.resizingDock .dockBody{ transition: none; }
+        body.resizingPanel .split{ transition: none; }
+          
+        .dockBody.collapsed{
+          height: 0px;
+          min-height: 0;
+          border-top: 0;
+        }
+
+        .tableBar{
+          padding: 10px 12px;
+          border-bottom: 1px solid var(--stroke);
+          display:flex;
+          gap:10px;
+          flex-wrap:wrap;
+          align-items:center;
+          background: rgba(255,255,255,.94);
+        }
+        .tableBarRight{
+          margin-left:auto;
+          display:flex;
+          gap:8px;
+          align-items:center;
+          flex-wrap:wrap;
+          justify-content:flex-end;
+        }
+        .smallHint{
+          font-size: 11px;
+          font-weight: 520;
+          color: rgba(11,18,32,.60);
+          display:inline-flex;
+          align-items:center;
+          gap:8px;
+          white-space:nowrap;
+        }
+
+        .colorPickWrap{ display:inline-flex; align-items:center; gap:8px; }
+        .colorCircle{
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          border: 1px solid rgba(11,18,32,.14);
           background: rgba(255,255,255,.92);
-          box-shadow: 0 18px 52px rgba(11,18,32,.14);
-          display:none;
+          box-shadow: 0 12px 26px rgba(11,18,32,.08);
+          display:inline-flex;
           align-items:center;
           justify-content:center;
           cursor:pointer;
-          transition: transform .12s ease, box-shadow .15s ease, border-color .15s ease;
+          transition: transform .10s ease, border-color .15s ease, box-shadow .15s ease;
         }
-        .fab:hover{ transform: translateY(-2px); border-color: rgba(15,122,58,.22); box-shadow: 0 24px 62px rgba(11,18,32,.16); }
+        .colorCircle:hover{ transform: translateY(-1px); border-color: rgba(15,122,58,.20); box-shadow: 0 16px 34px rgba(11,18,32,.10); }
+        .colorSwatch{
+          width: 14px; height: 14px;
+          border-radius: 999px;
+          border: 1px solid rgba(11,18,32,.18);
+          box-shadow: 0 0 0 7px rgba(11,18,32,.04);
+        }
+        .hiddenColorInput{
+          position:absolute;
+          opacity:0;
+          width:1px;
+          height:1px;
+          pointer-events:none;
+        }
+
+        .tableWrap{
+          flex: 1;
+          min-height: 0;
+          overflow: auto;
+          -webkit-overflow-scrolling: touch;
+          background: rgba(11,18,32,.03);
+        }
+
+        table{
+          border-collapse: separate;
+          border-spacing: 0;
+          width: 100%;
+          font-size: 10.5px;
+          min-width: 980px;
+        }
+        th, td{
+          border-bottom: 1px solid rgba(11,18,32,.08);
+          padding: 8px 10px;
+          text-align:left;
+          vertical-align: middle; /* ✅ important */
+        }
+        th{
+          position: sticky;
+          top: 0;
+          z-index: 3;
+          background: rgba(255,255,255,.98);
+          border-bottom: 1px solid rgba(11,18,32,.12);
+          font-weight: 600;
+          color: rgba(11,18,32,.88);
+          white-space: nowrap;
+        }
+        td{
+          font-weight: 420;
+          color: rgba(11,18,32,.82);
+
+          /* ✅ prevent wrapping (keeps row height small) */
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+
+          max-width: 260px; /* adjust if you want wider */
+        }
+
+        td.col-remarks,
+        td.col-po_add{
+          white-space: normal;
+          word-break: break-word;
+        }
+
+        /* ✅ Fix ugly wrapping for __fid (circled in your screenshot) */
+        td.col-fid{
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+          white-space: nowrap;
+          word-break: normal;
+          max-width: none;
+        }
+        td.col-idx{
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+          white-space: nowrap;
+          max-width: none;
+        }
+
+        tbody tr:hover td{ background: rgba(15,122,58,.05); }
+
+        tbody tr.rowSelected td{
+          background: rgba(15,122,58,.09) !important;
+          border-bottom-color: rgba(15,122,58,.16);
+        }
+        tbody tr.rowSelected td:first-child{
+          box-shadow: inset 4px 0 0 rgba(15,122,58,.70);
+        }
+
+        /* ✅ keep highlight continuous even with controls inside cells */
+        tbody tr.rowSelected .btn,
+        tbody tr.rowSelected .colorCircle{
+          background: rgba(15,122,58,.06) !important;
+          border-color: rgba(15,122,58,.22) !important;
+          box-shadow: none !important;
+        }
+
+        tbody tr.rowSelected .colorSwatch{
+          box-shadow: 0 0 0 6px rgba(15,122,58,.10) !important;
+        }
+
+
+        .rowActionsCell{
+            white-space: nowrap;
+            vertical-align: middle;
+            width: 150px; /* optional */
+          }
+
+          .rowActions{
+            display:flex;
+            align-items:center;
+            gap:10px;
+          }
+
+
+        .rowChk{ width:16px; height:16px; cursor:pointer; accent-color: var(--primary); }
+
+        .profileWrap{ position: relative; z-index: 70000; }
+        .profileMenu{
+          position: absolute;
+          top: calc(100% + 10px);
+          right: 0;
+          width: 240px;
+          border-radius: 18px;
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.98);
+          box-shadow: var(--shadow2);
+          overflow: hidden;
+          z-index: 70010;
+          transform: translateY(6px);
+          opacity: 0;
+          animation: menuIn .14s ease-out forwards;
+        }
+        @keyframes menuIn { to { transform: translateY(0); opacity: 1; } }
+        .profileMenu::before{
+          content:"";
+          position:absolute;
+          top:-7px;
+          right: 16px;
+          width: 12px;
+          height: 12px;
+          background: rgba(255,255,255,.98);
+          border-left: 1px solid var(--stroke);
+          border-top: 1px solid var(--stroke);
+          transform: rotate(45deg);
+        }
+        .profileHead{ padding: 12px; }
+        .profileName{ font-size: 13px; font-weight: 620; letter-spacing: -0.08px; }
+        .profileDivider{ height:1px; background: rgba(11,18,32,.08); }
+        .profileItem{
+          width:100%;
+          display:flex;
+          align-items:center;
+          gap:10px;
+          padding: 11px 12px;
+          border:0;
+          background: transparent;
+          cursor:pointer;
+          font-size: 13px;
+          font-weight: 520;
+          color: var(--text);
+        }
+        .profileItem:hover{ background: rgba(15,122,58,.05); }
+
+        .topRight{ display:flex; align-items:center; gap:10px; }
+        .avatar{
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          border: 1px solid rgba(11,18,32,.12);
+          background: rgba(15,122,58,.10);
+          color: var(--primary);
+          font-size: 12px;
+          font-weight: 650;
+          overflow:hidden;
+          line-height: 1;
+        }
+
+        @keyframes toastIn { from { transform: translateY(-6px); opacity: 0;} to { transform: translateY(0); opacity: 1;} }
+        @keyframes popIn { from { transform: translateY(6px) scale(.98); opacity: 0;} to { transform: translateY(0) scale(1); opacity: 1;} }
+
+        .toast{
+          position: fixed;
+          top: 14px;
+          right: 14px;
+          z-index: 99999;
+          border-radius: 16px;
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.92);
+          backdrop-filter: blur(12px);
+          box-shadow: 0 18px 60px rgba(11,18,32,.18);
+          padding: 10px 12px;
+          display:flex;
+          align-items:center;
+          gap:10px;
+          min-width: 240px;
+          max-width: 360px;
+          animation: toastIn .16s ease-out;
+          font-size: 12px;
+          font-weight: 600;
+          color: rgba(11,18,32,.90);
+        }
+        .dot{ width: 10px; height: 10px; border-radius: 999px; background: rgba(11,18,32,.45); }
+        .dot.success{ background: rgba(15,122,58,.85); }
+        .dot.error{ background: rgba(180,35,24,.95); }
+        .dot.info{ background: rgba(17,102,204,.90); }
+
+        .overlaySaving{
+          position: fixed;
+          inset: 0;
+          z-index: 9998;
+          background: rgba(255,255,255,.55);
+          backdrop-filter: blur(6px);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding: 18px;
+        }
+        .overlayCard{
+          width: min(520px, 100%);
+          border: 1px solid var(--stroke);
+          background: rgba(255,255,255,.92);
+          border-radius: 22px;
+          box-shadow: 0 24px 90px rgba(11,18,32,.18);
+          padding: 14px 14px;
+          animation: popIn .14s ease-out;
+        }
+        .overlayTop{ display:flex; gap:12px; align-items:center; }
+        .overlayIcon{
+          width: 44px;
+          height: 44px;
+          border-radius: 16px;
+          border: 1px solid var(--stroke);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          background: rgba(11,18,32,.03);
+          flex: 0 0 auto;
+        }
+        .overlayTitle{ font-size: 13px; font-weight: 650; letter-spacing: -.14px; }
+        .overlaySub{
+          margin-top: 3px;
+          font-size: 12px;
+          font-weight: 520;
+          color: rgba(11,18,32,.62);
+          line-height: 1.25;
+        }
+        .overlayHint{
+          margin-top: 10px;
+          display:flex;
+          gap:8px;
+          align-items:center;
+          font-size: 11px;
+          font-weight: 520;
+          color: rgba(11,18,32,.62);
+          padding: 8px 10px;
+          border-radius: 14px;
+          border: 1px dashed rgba(11,18,32,.16);
+          background: rgba(255,255,255,.72);
+        }
+
+        /* ✅ Mobile: remove the “adjustable line” (splitter) completely and use a floating table sheet */
+          @media (max-width: 1280px){
+            body{ overflow:hidden; }
+            .main{ padding: 0; gap: 0; }
+
+            .split{
+              grid-template-columns: 1fr !important;
+            }
+
+          /* ✅ when the LEFT panel itself becomes narrow */
+          @container (max-width: 340px){
+            .miniIconBtn{ width: 30px; height: 30px; }
+            .miniActions{ gap: 6px; }
+            .miniMeta{ display:none; } /* optional: gives more space */
+            .badgeOn{ display:none; }  /* optional */
+          }
+
+          .panel{ 
+          container-type: inline-size;
+          display:none !important; 
+          }
+
+          .splitterWrap, .splitter{ display:none !important; }
+          .mapStack{ 
+          border:0; 
+          border-radius:0; 
+          box-shadow:none; 
+          background: transparent; 
+          grid-column: 1 / -1 !important;
+          width: 100%;
+          }
+          .mapInner{ border-radius: 0; }
+
+          .mapHead{
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            background: rgba(255,255,255,.92);
+            backdrop-filter: blur(14px);
+          }
+
+          /* ✅ turn dock into bottom sheet (better UX, no overlap with layer button) */
+          .dock{
+            position: fixed;
+            left: 10px;
+            right: 10px;
+            bottom: 10px;
+            z-index: 6000;
+            border-radius: 24px;
+            border: 1px solid var(--stroke);
+            box-shadow: 0 24px 90px rgba(11,18,32,.18);
+            overflow: hidden;
+          }
+
+          .dockResizer{ display:none !important; cursor: default; }
+          .dockBody{ max-height: 60vh; height: auto; }
+          .dockBody.collapsed{ height: 0; }
+
+          table{ min-width: 920px; font-size: 10px; }
+          th, td{ padding: 8px 9px; }
+          }
+
+          .fab{
+            position: fixed;
+            right: 14px;
+            bottom: var(--fabBottom, 14px); /* ✅ was 14px */
+            z-index: 9000;
+            width: 56px;
+            height: 56px;
+            border-radius: 20px;
+            border: 1px solid var(--stroke);
+            background: rgba(255,255,255,.92);
+            box-shadow: 0 18px 52px rgba(11,18,32,.14);
+            display:none;
+            align-items:center;
+            justify-content:center;
+            cursor:pointer;
+            transition: transform .12s ease, box-shadow .15s ease, border-color .15s ease;
+          }
+
+        .fab:hover{ transform: translateY(-2px); border-color: rgba(15,122,58,.18); box-shadow: 0 24px 62px rgba(11,18,32,.16); }
         .fab:active{ transform: translateY(0); }
         .fabIcon{
           width: 28px; height: 28px;
@@ -1160,7 +2286,7 @@ const requestUserLocation = useCallback(() => {
           border-radius: 999px;
           background: var(--primary);
           color: white;
-          font-weight: 1000;
+          font-weight: 650;
           font-size: 12px;
           display:flex;
           align-items:center;
@@ -1168,7 +2294,7 @@ const requestUserLocation = useCallback(() => {
           border: 2px solid #fff;
           box-shadow: 0 12px 20px rgba(11,18,32,.18);
         }
-        @media (max-width: 980px){ .fab{ display:flex; } }
+        @media (max-width: 1100px){ .fab{ display:flex; } }
 
         .sheetOverlay{
           position: fixed; inset: 0;
@@ -1212,360 +2338,122 @@ const requestUserLocation = useCallback(() => {
           justify-content:space-between;
           gap:10px;
         }
-        .sheetTitle{ font-weight: 1000; display:flex; align-items:center; gap:10px; }
-
-        .modalOverlay{
-          position: fixed;
-          inset: 0;
-          background: rgba(11,18,32,.50);
-          z-index: 90000;
-          display:flex;
-          align-items:flex-end;
-          justify-content:center;
-          padding: 10px;
-        }
-        .modal{
-          width: min(1180px, 100%);
-          height: min(86vh, 920px);
-          background: rgba(255,255,255,.96);
-          border: 1px solid var(--stroke);
-          border-radius: 24px;
-          box-shadow: var(--shadow2);
-          overflow:hidden;
-          display:flex;
-          flex-direction:column;
-          transform: translateY(14px);
-          opacity: 0;
-          animation: sheetIn .18s ease-out forwards;
-        }
-        @media (min-width: 900px){ .modalOverlay{ align-items:center; } }
-
-        .modalTop{
-          padding: 12px;
-          border-bottom: 1px solid var(--stroke);
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap:10px;
-          flex-wrap:wrap;
-          background: rgba(255,255,255,.96);
-        }
-        .rowTools{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; width:100%; }
-
-        .emptyState{
-          padding: 18px 12px;
-          color: rgba(11,18,32,.65);
-          font-weight: 950;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          gap:12px;
-          min-height: 140px;
-        }
-
-        .tableBar{
-          padding: 10px 12px;
-          border-bottom: 1px solid var(--stroke);
-          display:flex;
-          gap:10px;
-          flex-wrap:wrap;
-          align-items:center;
-          background: rgba(255,255,255,.94);
-        }
-        .tableBarRight{
-          margin-left:auto;
+        .sheetTitle{ font-weight: 650; display:flex; align-items:center; gap:10px; font-size: 13px; }
+        .tabRow{
+          padding: 10px 12px 0;
           display:flex;
           gap:8px;
-          align-items:center;
           flex-wrap:wrap;
-          justify-content:flex-end;
         }
-        .smallHint{
-          font-size:12px;
-          font-weight: 900;
-          color: rgba(11,18,32,.62);
-          display:inline-flex;
-          align-items:center;
-          gap:8px;
-          white-space:nowrap;
-        }
-
-        .colorPickWrap{ display:inline-flex; align-items:center; gap:8px; }
-        .colorCircle{
-          width: 34px;
-          height: 34px;
-          border-radius: 999px;
-          border: 1px solid rgba(11,18,32,.14);
-          background: rgba(255,255,255,.92);
-          box-shadow: 0 12px 26px rgba(11,18,32,.08);
-          display:inline-flex;
-          align-items:center;
-          justify-content:center;
-          cursor:pointer;
-          transition: transform .10s ease, border-color .15s ease, box-shadow .15s ease;
-        }
-        .colorCircle:hover{ transform: translateY(-1px); border-color: rgba(15,122,58,.22); box-shadow: 0 16px 34px rgba(11,18,32,.10); }
-        .colorCircle:active{ transform: translateY(0); }
-        .colorCircle:focus-visible{ outline: 3px solid rgba(15,122,58,.22); outline-offset: 2px; }
-        .colorSwatch{
-          width: 14px; height: 14px;
-          border-radius: 999px;
-          border: 1px solid rgba(11,18,32,.18);
-          box-shadow: 0 0 0 7px rgba(11,18,32,.04);
-          background: var(--text);
-        }
-        .hiddenColorInput{
-          position:absolute;
-          opacity:0;
-          width:1px;
-          height:1px;
-          pointer-events:none;
-        }
-
-        .tableWrap{
-          flex: 1;
-          min-height: 0;
-          overflow: auto;
-          -webkit-overflow-scrolling: touch;
-          background: rgba(11,18,32,.03);
-        }
-
-        table{
-          border-collapse: separate;
-          border-spacing: 0;
-          width: max(100%, 980px);
-          font-size: 11px;
-        }
-        th, td{
-          border-bottom: 1px solid rgba(11,18,32,.08);
-          padding: 10px 10px;
-          text-align:left;
-          vertical-align: top;
-          white-space: nowrap;
-        }
-        th{
-          position: sticky;
-          top: 0;
-          z-index: 3;
-          background: rgba(255,255,255,.98);
-          border-bottom: 1px solid rgba(11,18,32,.12);
-          font-weight: 700;
-          color: rgba(11,18,32,.92);
-        }
-        td{ font-weight: 450;  color: rgba(11,18,32,.82); }
-        tbody tr:hover td{ background: rgba(15,122,58,.06); }
-
-        tbody tr.rowSelected td{
-          background: rgba(15,122,58,.10) !important;
-          border-bottom-color: rgba(15,122,58,.18);
-        }
-        tbody tr.rowSelected td:first-child{
-          box-shadow: inset 4px 0 0 rgba(15,122,58,.75);
-        }
-
-        .rowChk{ width:16px; height:16px; cursor:pointer; accent-color: var(--primary); }
-
-        .hud{
-          position: fixed;
-          top: 70px;
-          left: 50%;
-          transform: translateX(-50%);
-          z-index: 20000;
-          padding: 10px 12px;
-          border-radius: 999px;
+        .tab{
           border: 1px solid var(--stroke);
-          background: rgba(255,255,255,.92);
-          box-shadow: 0 18px 52px rgba(11,18,32,.14);
-          display:flex;
-          align-items:center;
-          gap:10px;
-        }
-        .hudCount{
-          min-width: 22px;
-          height: 22px;
-          padding: 0 7px;
           border-radius: 999px;
-          border: 1px solid rgba(11,18,32,.12);
-          background: rgba(255,255,255,.92);
-          font-weight: 1000;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          color: rgba(11,18,32,.80);
-        }
-
-        .profileWrap{ position: relative; z-index: 70000; }
-        .profileMenu{
-          position: absolute;
-          top: calc(100% + 10px);
-          right: 0;
-          width: 240px;
-          border-radius: 18px;
-          border: 1px solid var(--stroke);
-          background: rgba(255,255,255,.98);
-          box-shadow: var(--shadow2);
-          overflow: hidden;
-          z-index: 70010;
-          transform: translateY(6px);
-          opacity: 0;
-          animation: menuIn .14s ease-out forwards;
-          isolation: isolate;
-          will-change: transform, opacity;
-        }
-        @keyframes menuIn { to { transform: translateY(0); opacity: 1; } }
-
-        .profileMenu::before{
-          content:"";
-          position:absolute;
-          top:-7px;
-          right: 16px;
-          width: 12px;
-          height: 12px;
-          background: rgba(255,255,255,.98);
-          border-left: 1px solid var(--stroke);
-          border-top: 1px solid var(--stroke);
-          transform: rotate(45deg);
-        }
-
-        .profileHead{ padding: 12px; }
-        .profileName{
-          font-size: 14px;
-          font-weight: 750;
-          letter-spacing: -0.1px;
-        }
-        .profileSub{
-          font-size: 11px;
-          font-weight: 500;
-          color: var(--muted);
-          margin-top: 2px;
-        }
-
-        .profileDivider{ height:1px; background: rgba(11,18,32,.08); }
-
-        .profileItem{
-          width:100%;
-          display:flex;
-          align-items:center;
-          gap:10px;
-          padding: 11px 12px;
-          border:0;
-          background: transparent;
-          cursor:pointer;
-          font-size: 13px;
-          font-weight: 500;
-          color: var(--text);
-        }
-        .profileItem:hover{ background: rgba(15,122,58,.06); }
-        .profileItem svg{ opacity:.9; }
-
-        .topRight{ display:flex; align-items:center; gap:10px; }
-
-        .avatar{
-          width: 34px;
-          height: 34px;
-          border-radius: 999px;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          border: 1px solid rgba(11,18,32,.12);
-          background: rgba(15,122,58,.10);
-          color: var(--primary);
-          font-size: 13px;
-          font-weight: 700;
-          overflow:hidden;
-          line-height: 1;
-        }
-
-        @keyframes toastIn { from { transform: translateY(-6px); opacity: 0;} to { transform: translateY(0); opacity: 1;} }
-        @keyframes popIn { from { transform: translateY(6px) scale(.98); opacity: 0;} to { transform: translateY(0) scale(1); opacity: 1;} }
-
-        /* toast */
-        .toast{
-          position: fixed;
-          top: 14px;
-          right: 14px;
-          z-index: 99999;
-          border-radius: 16px;
-          border: 1px solid var(--stroke);
-          background: rgba(255,255,255,.92);
-          backdrop-filter: blur(12px);
-          box-shadow: 0 18px 60px rgba(11,18,32,.18);
-          padding: 10px 12px;
-          display:flex;
-          align-items:center;
-          gap:10px;
-          min-width: 240px;
-          max-width: 360px;
-          animation: toastIn .16s ease-out;
-          font-size: 12px;
-          font-weight: 800;
-          color: rgba(11,18,32,.90);
-        }
-        .dot{ width: 10px; height: 10px; border-radius: 999px; background: rgba(11,18,32,.45); }
-        .dot.success{ background: rgba(15,122,58,.85); }
-        .dot.error{ background: rgba(180,35,24,.95); }
-        .dot.info{ background: rgba(17,102,204,.90); }
-
-        /* admin-style overlay */
-        .overlaySaving{
-          position: fixed;
-          inset: 0;
-          z-index: 9998;
-          background: rgba(255,255,255,.55);
-          backdrop-filter: blur(6px);
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          padding: 18px;
-        }
-        .overlayCard{
-          width: min(520px, 100%);
-          border: 1px solid var(--stroke);
-          background: rgba(255,255,255,.92);
-          border-radius: 22px;
-          box-shadow: 0 24px 90px rgba(11,18,32,.18);
-          padding: 14px 14px;
-          animation: popIn .14s ease-out;
-        }
-        .overlayTop{ display:flex; gap:12px; align-items:center; }
-        .overlayIcon{
-          width: 44px;
-          height: 44px;
-          border-radius: 16px;
-          border: 1px solid var(--stroke);
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          background: rgba(11,18,32,.03);
-          flex: 0 0 auto;
-        }
-        .overlayTitle{ font-size: 14px; font-weight: 950; letter-spacing: -.2px; }
-        .overlaySub{
-          margin-top: 3px;
-          font-size: 12px;
-          font-weight: 650;
-          color: rgba(11,18,32,.62);
-          line-height: 1.25;
-        }
-        .overlayHint{
-          margin-top: 10px;
-          display:flex;
-          gap:8px;
-          align-items:center;
-          font-size: 11px;
-          font-weight: 750;
-          color: rgba(11,18,32,.62);
           padding: 8px 10px;
-          border-radius: 14px;
-          border: 1px dashed rgba(11,18,32,.16);
-          background: rgba(255,255,255,.72);
+          font-size: 12px;
+          font-weight: 560;
+          background: rgba(255,255,255,.92);
+          cursor:pointer;
         }
+        .tab.active{
+          border-color: rgba(15,122,58,.24);
+          background: rgba(15,122,58,.10);
+          color: rgba(15,122,58,.95);
+        }
+          /* ✅ active icon style (same vibe as the green layered button) */
+          .iconActive{
+            border-color: rgba(15,122,58,.26) !important;
+            background: rgba(15,122,58,.10) !important;
+            color: rgba(15,122,58,.95) !important;
+          }
+
+          /* GROUP WRAPPER */
+.groupBlock{
+  border: 1px solid rgba(11,18,32,.08);
+  border-radius: 16px;
+  background: rgba(255,255,255,.75);
+}
+
+
+/* ✅ header becomes a compact row */
+.groupHeader{
+  width: 100%;
+  border: 0;
+  background: rgba(255,255,255,.92);
+  padding: 9px 10px;          /* ✅ smaller */
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  cursor:pointer;
+  border-radius: 14px;        /* ✅ slightly tighter */
+  transition: background .15s ease, box-shadow .15s ease, transform .10s ease;
+}
+
+.groupHeader:hover{
+  background: rgba(15,122,58,.06);
+  box-shadow: 0 10px 26px rgba(11,18,32,.08);
+  transform: translateY(-1px);
+}
+
+
+.groupLeft{
+  display:flex;
+  align-items:center;
+  gap:8px;                    /* ✅ smaller gap */
+  min-width:0;
+}
+
+.groupTitle{
+  font-size: 11.5px;          /* ✅ smaller text */
+  font-weight: 700;
+  letter-spacing: -.15px;
+  line-height: 1;
+}
+
+.groupBadge{
+  font-size: 10px;            /* ✅ smaller badge */
+  font-weight: 650;
+  padding: 2px 6px;           /* ✅ smaller badge padding */
+  border-radius: 999px;
+  background: rgba(15,122,58,.08);
+  border: 1px solid rgba(15,122,58,.18);
+  color: rgba(15,122,58,.95);
+  line-height: 1.1;
+}
+
+.groupToggle{
+  font-size: 11px;            /* ✅ smaller chevron */
+  color: rgba(11,18,32,.6);
+}
+
+
+      .groupItems{
+        max-height: 55vh;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 10px 14px 10px 10px;   /* ✅ RIGHT padding increased */
+      }
+
+/* nicer scrollbar (optional) */
+.groupItems::-webkit-scrollbar{ width: 10px; }
+.groupItems::-webkit-scrollbar-thumb{
+  background: rgba(11,18,32,.12);
+  border-radius: 999px;
+  border: 3px solid rgba(255,255,255,.65);
+}
       `}</style>
 
+      {/* HEADER */}
       <div className="topBar">
         <div className="brand">
           <div className="appIcon" aria-hidden="true">
-            <Image src="/images/denr.png" alt="DENR Logo" width={28} height={28} style={{ objectFit: "contain" }} priority />
+            <Image
+              src="/images/denr.png"
+              alt="DENR Logo"
+              width={28}
+              height={28}
+              style={{ objectFit: "contain" }}
+              priority
+            />
           </div>
           <div className="titleWrap">
             <div className="title">One Control Map</div>
@@ -1613,389 +2501,467 @@ const requestUserLocation = useCallback(() => {
         </div>
       </div>
 
-      <div className="main">
-        {/* LEFT PANEL */}
-        <div className="panel">
-          <div className="panelHead">
-            <div className="headRow">
-              <div className="headLeft">
-                <div className="sectionTitle">Layers</div>
-                <div className="pill">{filtered.length}</div>
-              </div>
+      {/* MAIN */}
+      <div
+          className="main"
+          style={
+            {
+              ["--panelW" as any]: `${panelWidth}px`,
+              ["--dockH" as any]: `${dockHeight}px`,
 
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                {isFiltering ? (
-                  <button
-                    className="btn btnPrimary"
-                    onClick={() => selectFiltered(!hasAllVisibleFiltered, filteredIds)}
-                    disabled={filtered.length === 0}
-                    title="Select all filtered"
-                    type="button"
-                  >
-                    <FontAwesomeIcon icon={hasAllVisibleFiltered ? faCheckSquare : faSquare} />
-                  </button>
-                ) : null}
-
-                <button
-                  className="btn btnDanger"
-                  onClick={() => (isFiltering ? selectFiltered(false, filteredIds) : clearAll())}
-                  disabled={isFiltering ? !hasAnyVisibleFiltered : visibleCount === 0}
-                  title="Hide all"
-                  type="button"
-                >
-                  <FontAwesomeIcon icon={faEyeSlash} />
-                </button>
-              </div>
-              
-            </div>
-
-            <div className="searchWrap">
-              <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
-              <input className="searchInput" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search layers…" />
-              {isFiltering ? (
-                <button className="btn btnGhost iconBtn" onClick={() => setSearch("")} title="Clear" type="button">
-                  <FontAwesomeIcon icon={faXmark} />
-                </button>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="list">
-            {loadingList && layers.length === 0 ? (
-              <>
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="card">
-                    <div className="cardTop">
-                      <div style={{ flex: 1 }}>
-                        <Shimmer h={12} w="70%" />
-                        <div style={{ height: 8 }} />
-                        <Shimmer h={10} w="46%" />
-                      </div>
-                      <Ring size={16} />
-                    </div>
-                    <div className="row">
-                      <div className="leftRow">
-                        <span className="statusDot" />
-                        <Shimmer h={12} w="90px" />
-                      </div>
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <Shimmer h={40} w="40px" />
-                        <Shimmer h={40} w="40px" />
-                      </div>
-                    </div>
+              // ✅ Move FAB above the dock top bar on mobile
+              ["--fabBottom" as any]: isMobile
+              ? tableCollapsed
+                ? "90px"
+                : `calc(14px + min(60vh, ${dockHeight}px))` // stays above expanded dock
+              : "14px",
+            } as any
+          }
+        >
+        <div className="split">
+          {/* LEFT PANEL (Desktop) */}
+          <div className="panel">
+            <div className="panelHead">
+              <div className="headRow">
+                <div className="headLeft">
+                  <div className="sectionTitle">
+                    <FontAwesomeIcon icon={faLayerGroup} />
+                    Layers
                   </div>
-                ))}
-              </>
-            ) : filtered.length === 0 ? (
-              <div className="pill" style={{ alignSelf: "flex-start" }}>
-                No results
-              </div>
-            ) : (
-              filtered.map((l) => {
-                const selectedCount = selectedFeatureIdxByLayer[l.id]?.size ?? 0;
-                const ready = l.visible && l.geojson;
-                const orderNo = layerOrderNumberById[l.id];
-
-                return (
-                  <div key={l.id} className="card">
-                    <div className="cardTop">
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <div className="name" title={l.name} style={{ flex: 1, minWidth: 0 }}>
-                            {l.name}
-                          </div>
-                          {orderNo ? (
-                            <span className="pill" title="Draw order" style={{ padding: "4px 8px", fontSize: 10 }}>
-                              #{orderNo}
-                            </span>
-                          ) : null}
-                        </div>
-
-                        <div className="meta">
-                          {l.geom_type ?? "-"} • SRID {l.srid ?? "-"}
-                          {selectedCount > 0 ? ` • ${selectedCount}` : ""}
-                        </div>
-                      </div>
-                      {l.loading ? <Ring size={16} /> : <span className={`statusDot ${ready ? "on" : ""}`} aria-hidden="true" />}
-                    </div>
-
-                    <div className="row">
-                      <div className="leftRow">
-                        <input
-                          className="layerChk"
-                          type="checkbox"
-                          checked={l.visible}
-                          onChange={(e) => toggleLayer(l.id, e.target.checked)}
-                          aria-label={`Toggle ${l.name}`}
-                        />
-                        <span className={`statusDot ${l.loading ? "loading" : ready ? "on" : ""}`} aria-hidden="true" />
-                      </div>
-
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <button className="btn btnPrimary iconBtn" onClick={() => loadGeojson(l.id, "map")} disabled={l.loading} title="Reload GeoJSON" type="button">
-                          {l.loading ? <Ring size={16} /> : <FontAwesomeIcon icon={faArrowsRotate} />}
-                        </button>
-                        <button className="btn btnGhost iconBtn" onClick={() => openAttributeTable(l.id)} title="Attribute table" type="button">
-                          <FontAwesomeIcon icon={faTable} />
-                        </button>
-                      </div>
-                    </div>
-
-                    {l.error ? <div className="err">⚠ {l.error}</div> : null}
+                  <div className="pill" title="Total in list">
+                    {filtered.length}
                   </div>
-                );
-              })
-            )}
-          </div>
-        </div>
+                  <div className="pill" title="Selected / loaded">
+                    {visibleCount} • {loadedCount}
+                  </div>
+                </div>
 
-        {/* MAP */}
-        <div className="mapCard">
-          <div className="mapHead">
-            <div className="mapTitle">
-              Map
-              <span className="chip">
-                <FontAwesomeIcon icon={faEye} /> <b>{visibleLayers.length}</b>
-              </span>
-              {loadingAny ? (
-                <span className="chip" title="Loading">
-                  <Ring size={14} />
-                </span>
-              ) : null}
-              <span className="chip" title="Visible / loaded">
-                <b>{visibleCount}</b> • <b>{loadedCount}</b>
-              </span>
-            </div>
-
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <button
-              className={showBasemap ? "btn btnPrimary" : "btn btnGhost"}
-              onClick={() => {
-                setShowBasemap((v) => {
-                  const next = !v;
-                  if (!next) setUserLoc(null); // optional
-                  return next;
-                });
-              }}
-              title={showBasemap ? "Basemap ON" : "Basemap OFF (faster)"}
-              type="button"
-            >
-              {showBasemap ? "Basemap: ON" : "Basemap: OFF"}
-            </button>
-
-              <button className="btn btnPrimary iconBtn" onClick={refreshList} disabled={loadingList} title="Refresh layer list" type="button">
-                {loadingList ? <Ring size={16} /> : <FontAwesomeIcon icon={faRotateRight} />}
-              </button>
-
-              {showBasemap ? (
-              <button
-              className="btn btnGhost iconBtn"
-              onClick={requestUserLocation}
-              disabled={locLoading}
-              title={userLoc ? "Update my location" : "Show my location"}
-              type="button"
-            >
-              {locLoading ? <Ring size={16} /> : <FontAwesomeIcon icon={faLocationCrosshairs} />}
-            </button>
-              ) : null}
-
-
-              {/* <button className="btn btnGhost iconBtn" onClick={reloadVisibleLayers} disabled={visibleCount === 0} title="Reload visible layers" type="button">
-                <FontAwesomeIcon icon={faArrowsRotate} />
-              </button> */}
-            </div>
-          </div>
-
-          <div className="mapArea">
-            <div className="mapInner">
-            <ResultMap
-              key={mapKey}
-              showBasemap={showBasemap}
-              backgroundColor="#ffffff"
-              layers={[
-                ...visibleLayers.map((v) => ({
-                  id: v.id,
-                  name: v.name,
-                  color: DEFAULT_LAYER_COLOR,
-                  geom_type: v.geom_type,
-                  geojson: v.geojson,
-                  // ✅ give proper order so later items don't cover it
-                  orderNo: layerOrderNumberById[v.id] ?? 1,
-                })),
-
-                // ✅ ALWAYS add My Location if it exists (NOT tied to showBasemap)
-                ...(userLocGeojson
-                  ? [
-                      {
-                        id: "__my_location__",
-                        name: "My Location",
-                        color: "#ef4444",
-                        geom_type: "Point",
-                        geojson: userLocGeojson,
-                        orderNo: 999999, // ✅ always top
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-
-
-
-
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* MOBILE FAB */}
-      <button className="fab" onClick={() => setMobilePanelOpen(true)} aria-label="Open layers" type="button">
-        <span className="fabIcon">
-          <FontAwesomeIcon icon={faLayerGroup} />
-        </span>
-        <span className="fabBadge" title="Visible layers">
-          {visibleCount}
-        </span>
-      </button>
-
-      {/* MOBILE SHEET */}
-      {mobilePanelOpen ? (
-        <div className="sheetOverlay" onClick={() => setMobilePanelOpen(false)} role="dialog" aria-modal="true">
-          <div className="sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="grab" />
-            <div className="sheetTop">
-              <div className="sheetTitle">
-                <FontAwesomeIcon icon={faLayerGroup} />
-                Layers
-                <span className="pill" style={{ padding: "5px 9px" }}>
-                  {filtered.length}
-                </span>
-              </div>
-
-              <button className="btn btnGhost iconBtn" onClick={() => setMobilePanelOpen(false)} title="Close" type="button">
-                <FontAwesomeIcon icon={faChevronDown} />
-              </button>
-            </div>
-
-            <div className="panelHead" style={{ borderRadius: 0 }}>
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <div className="searchWrap" style={{ flex: 1 }}>
-                  <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
-                  <input className="searchInput" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search layers…" />
+                {/* ✅ cleaner toolbar (fixes your circled top-left clutter) */}
+                <div className="toolbar" aria-label="Layers toolbar">
                   {isFiltering ? (
-                    <button className="btn btnGhost iconBtn" onClick={() => setSearch("")} title="Clear" type="button">
-                      <FontAwesomeIcon icon={faXmark} />
+                    <button
+                      className="btn btnPrimary iconBtn"
+                      onClick={() => selectFiltered(!hasAllVisibleFiltered, filteredIds)}
+                      disabled={filtered.length === 0}
+                      title={hasAllVisibleFiltered ? "Unselect filtered" : "Select filtered"}
+                      type="button"
+                    >
+                      <FontAwesomeIcon icon={hasAllVisibleFiltered ? faCheckSquare : faSquare} />
                     </button>
                   ) : null}
-                </div>
 
-                <button
-                  className="btn btnDanger iconBtn"
-                  onClick={() => (isFiltering ? selectFiltered(false, filteredIds) : clearAll())}
-                  disabled={isFiltering ? !hasAnyVisibleFiltered : visibleCount === 0}
-                  title="Hide all"
-                  type="button"
-                >
-                  <FontAwesomeIcon icon={faEyeSlash} />
-                </button>
-              </div>
-
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {isFiltering ? (
                   <button
-                    className="btn btnPrimary"
-                    onClick={() => selectFiltered(!hasAllVisibleFiltered, filteredIds)}
-                    disabled={filtered.length === 0}
-                    title="Select filtered"
+                    className="btn btnDanger iconBtn"
+                    onClick={() => (isFiltering ? selectFiltered(false, filteredIds) : clearAll())}
+                    disabled={isFiltering ? !hasAnyVisibleFiltered : visibleCount === 0}
+                    title="Clear"
                     type="button"
                   >
-                    <FontAwesomeIcon icon={hasAllVisibleFiltered ? faCheckSquare : faSquare} />
+                    <FontAwesomeIcon icon={faEyeSlash} />
+                  </button>
+
+                  <button
+                    className="btn btnPrimary iconBtn"
+                    onClick={refreshList}
+                    disabled={loadingList}
+                    title="Refresh layers"
+                    type="button"
+                  >
+                    {loadingList ? <Ring size={16} /> : <FontAwesomeIcon icon={faRotateRight} />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="searchWrap">
+                <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
+                <input
+                  className="searchInput"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search layers…"
+                />
+                {isFiltering ? (
+                  <button className="btn btnGhost iconBtn" onClick={() => setSearch("")} title="Clear search" type="button">
+                    <FontAwesomeIcon icon={faXmark} />
                   </button>
                 ) : null}
               </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div className="segWrap" role="tablist" aria-label="Layer tabs">
+                  <button
+                    className={`seg ${desktopTab === "all" ? "active" : ""}`}
+                    onClick={() => setDesktopTab("all")}
+                    type="button"
+                    role="tab"
+                    aria-selected={desktopTab === "all"}
+                  >
+                    <FontAwesomeIcon icon={faBars} />
+                    All
+                    <span style={{ opacity: 0.75 }}>({filtered.length})</span>
+                  </button>
+                  <button
+                    className={`seg ${desktopTab === "selected" ? "active" : ""}`}
+                    onClick={() => setDesktopTab("selected")}
+                    type="button"
+                    role="tab"
+                    aria-selected={desktopTab === "selected"}
+                  >
+                    <FontAwesomeIcon icon={faEye} />
+                    Selected
+                    <span style={{ opacity: 0.75 }}>
+                      ({visibleCount + (userLoc ? 1 : 0) + (measureLineGeojson ? 1 : 0)})
+                    </span>
+                  </button>
+                </div>
+
+                {/* <div className="pill" title="Tip">
+                  {desktopTab === "all" ? "Tap a layer name to add" : "Reorder + open table"}
+                </div> */}
+              </div>
             </div>
 
-            <div className="list" style={{ paddingBottom: 18 }}>
-              {filtered.length === 0 ? (
-                <div className="pill" style={{ alignSelf: "flex-start" }}>
-                  No results
-                </div>
-              ) : (
-                filtered.map((l) => {
-                  const orderNo = layerOrderNumberById[l.id];
-                  const selectedCount = selectedFeatureIdxByLayer[l.id]?.size ?? 0;
-                  const ready = l.visible && l.geojson;
-                  return (
-                    <div key={l.id} className="card">
-                      <div className="cardTop">
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <div className="name" title={l.name} style={{ flex: 1, minWidth: 0 }}>
-                              {l.name}
+            {/* LIST AREA */}
+            <div className="listWrap">
+              {desktopTab === "all" ? (
+                <>
+                  {loadingList && layers.length === 0 ? (
+                    <>
+                      {Array.from({ length: 10 }).map((_, i) => (
+                        <div key={i} className="miniItem">
+                          <div style={{ flex: 1 }}>
+                            <Shimmer h={12} w="70%" />
+                            <div style={{ height: 6 }} />
+                            <Shimmer h={10} w="48%" />
+                          </div>
+                          <Ring size={16} />
+                        </div>
+                      ))}
+                    </>
+                  ) : filtered.length === 0 ? (
+                    <div className="pill" style={{ alignSelf: "flex-start" }}>
+                      No results
+                    </div>
+                  ) : (
+
+                    groupedFiltered.map((g) => {
+                      const isOpen = groupOpen[g.key] ?? true;
+                    
+                      return (
+                        <div key={g.key} className="groupBlock">
+                               {/* ✅ GROUP HEADER */}
+
+                         <button
+                            type="button"
+                            onClick={() => setGroupOpen((p) => ({ ...p, [g.key]: !isOpen }))}
+                            className="groupHeader"
+                          >
+                            <div className="groupLeft">
+                              <span className="groupTitle">{g.key === "OTHERS" ? "Others" : g.key}</span>
+                              <span className="groupBadge">{g.items.length}</span>
                             </div>
 
-                            {orderNo ? (
-                              <span className="pill" title="Draw order" style={{ padding: "4px 8px", fontSize: 10 }}>
-                                #{orderNo}
-                              </span>
-                            ) : null}
-                          </div>
-
-                          <div className="meta">
-                            {l.geom_type ?? "-"} • SRID {l.srid ?? "-"}
-                            {selectedCount > 0 ? ` • ${selectedCount}` : ""}
-                          </div>
-                        </div>
-                        {l.loading ? <Ring size={16} /> : <span className={`statusDot ${ready ? "on" : ""}`} aria-hidden="true" />}
-                      </div>
-
-                      <div className="row">
-                        <div className="leftRow">
-                          <input className="layerChk" type="checkbox" checked={l.visible} onChange={(e) => toggleLayer(l.id, e.target.checked)} />
-                          <span className={`statusDot ${l.loading ? "loading" : ready ? "on" : ""}`} aria-hidden="true" />
-                        </div>
-
-                        <div style={{ display: "flex", gap: 8 }}>
-                          <button className="btn btnPrimary iconBtn" onClick={() => loadGeojson(l.id, "map")} disabled={l.loading} title="Reload" type="button">
-                            {l.loading ? <Ring size={16} /> : <FontAwesomeIcon icon={faArrowsRotate} />}
+                            <span className="groupToggle" aria-hidden="true">
+                              <FontAwesomeIcon icon={isOpen ? faChevronDown : faChevronRight} />
+                            </span>
                           </button>
-                          <button className="btn btnGhost iconBtn" onClick={() => openAttributeTable(l.id)} title="Attribute table" type="button">
-                            <FontAwesomeIcon icon={faTable} />
-                          </button>
+                    
+                          {/* ✅ GROUP ITEMS */}
+                          {isOpen ? (
+                            <div className="groupItems" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                              {g.items.map((l) => {
+                                const isOn = !!l.visible;
+                                return (
+                                  <div key={l.id} className={`miniItem ${isNarrowSidebar ? "stacked" : ""}`}>
+                                    <button
+                                      className="miniNameBtn"
+                                      onClick={() => addLayerFromAllList(l.id)}
+                                      title={isOn ? "Already selected — click to open table" : "Click to add"}
+                                      type="button"
+                                    >
+                                      <div className="miniName">{l.name}</div>
+                                      <div className="miniMeta">
+                                        {l.geom_type ?? "-"} • SRID {l.srid ?? "-"}
+                                      </div>
+                                    </button>
+                    
+                                    <div className="miniActions">
+                                      {isOn ? <span className="badgeOn">Selected</span> : null}
+                    
+                                      <button
+                                        className="btn btnPrimary miniIconBtn"
+                                        onClick={() => toggleLayer(l.id, !isOn)}
+                                        disabled={l.loading}
+                                        title={isOn ? "Remove" : "Add"}
+                                        type="button"
+                                      >
+                                        {l.loading ? <Ring size={14} /> : <FontAwesomeIcon icon={isOn ? faMinus : faPlus} />}
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
                         </div>
-                      </div>
+                      );
+                    })
 
-                      {l.error ? <div className="err">⚠ {l.error}</div> : null}
+
+                  )}
+                </>
+              ) : (
+                <>
+                  {selectedLayersOrdered.length === 0 ? (
+                    <div style={{ padding: 10, color: "rgba(11,18,32,.65)", fontWeight: 520 }}>
+                      Select a layer from <b>All</b> first.
                     </div>
-                  );
-                })
+                  ) : (
+                    selectedLayersOrdered.map((l) => {
+                      const orderNo = layerOrderNumberById[l.id];
+                      const isPseudo = l.id === MY_LOC_LAYER_ID || l.id === MEASURE_LAYER_ID;
+
+                      const selectedCount = !isPseudo ? selectedCountForLayer(l.id) : 0;
+                      const ready = isPseudo ? true : l.visible && l.geojson;
+
+                      return (
+                        <div key={l.id} className={`miniItem ${isNarrowSidebar ? "stacked" : ""}`}>
+                          <button
+                            className="miniNameBtn"
+                            onClick={() => (!isPseudo ? openAttributeTable(l.id) : undefined)}
+                            title={isPseudo ? "Pseudo layer" : "Open attribute table"}
+                            type="button"
+                            style={{ cursor: isPseudo ? "default" : "pointer" }}
+                          >
+                            <div className="miniName">
+                              {l.name}
+                              {orderNo ? (
+                                <span className="pill" style={{ padding: "3px 7px", fontSize: 10, marginLeft: 8 }} title="Draw order">
+                                  #{orderNo}
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="miniMeta">
+                              {l.geom_type ?? "-"}
+                              {l.srid ? ` • SRID ${l.srid}` : ""}
+                              {selectedCount > 0 ? ` • selected: ${selectedCount}` : ""}
+                              {!isPseudo ? (l.loading ? " • loading…" : ready ? " • ready" : "") : ""}
+                            </div>
+                          </button>
+
+                          <div className="miniActions">
+
+                            <button className="btn btnGhost miniIconBtn" onClick={() => moveLayer(l.id, "up")} title="Up" type="button">
+                              <FontAwesomeIcon icon={faArrowUp} />
+                            </button>
+                            <button className="btn btnGhost miniIconBtn" onClick={() => moveLayer(l.id, "down")} title="Down" type="button">
+                              <FontAwesomeIcon icon={faArrowDown} />
+                            </button>
+  
+
+                            {!isPseudo ? (
+                              <>
+                                <button
+                                  className="btn btnPrimary miniIconBtn"
+                                  onClick={() => loadGeojson(l.id, "map")}
+                                  disabled={l.loading}
+                                  title="Reload GeoJSON"
+                                  type="button"
+                                >
+                                  {l.loading ? <Ring size={14} /> : <FontAwesomeIcon icon={faArrowsRotate} />}
+                                </button>
+
+                                <button className="btn btnGhost miniIconBtn" onClick={() => openAttributeTable(l.id)} title="Table" type="button">
+                                  <FontAwesomeIcon icon={faTable} />
+                                </button>
+                              </>
+                            ) : null}
+
+                            <button
+                              className="btn btnDanger miniIconBtn"
+                              onClick={() => toggleLayer(l.id, false)}
+                              title={l.id === MY_LOC_LAYER_ID ? "Remove My Location" : l.id === MEASURE_LAYER_ID ? "Remove Measure" : "Remove"}
+                              type="button"
+                            >
+                              <FontAwesomeIcon icon={faXmark} />
+                            </button>
+                          </div>
+
+                          {!isPseudo && l.error ? <div className="err">⚠ {l.error}</div> : null}
+                        </div>
+                      );
+                    })
+                  )}
+                </>
               )}
             </div>
           </div>
-        </div>
-      ) : null}
 
-      {/* ATTRIBUTE TABLE */}
-      {tableOpen ? (
-        <div className="modalOverlay" onClick={() => setTableOpen(false)} role="dialog" aria-modal="true">
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modalTop">
-              <div className="pill" style={{ border: "none", padding: 0, background: "transparent" }}>
-                <FontAwesomeIcon icon={faTable} />
-                <span style={{ fontWeight: 1000, color: "var(--text)" }}>{tableLayer?.name ?? "Attributes"}</span>
-                {tableLayerId ? (
-                  <span className="smallHint" style={{ marginLeft: 10 }}>
-                    {tableSelectedSet.size > 0 ? `${tableSelectedSet.size}` : "0"}
+          {/* SPLITTER (Desktop) */}
+          <div className="splitterWrap">
+            <div
+              className="splitter"
+              onMouseDown={beginResizePanel}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                beginResizePanel();
+              }}
+              title="Drag to resize panel"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize panel"
+            >
+              <span className="splitterGrip" aria-hidden="true">
+                <span className="splitterDots" />
+              </span>
+            </div>
+          </div>
+
+          {/* RIGHT: MAP + TABLE */}
+          <div className="mapStack">
+            {/* MAP */}
+            <div className="mapCard">
+              <div className="mapHead">
+                <div className="mapTitle">
+                  Map
+                  <span className="chip">
+                    <FontAwesomeIcon icon={faEye} /> {mapLayersInput.length}
                   </span>
-                ) : null}
-              </div>
+                  <span className="chip" title="Selected / loaded">
+                    {visibleCount} • {loadedCount}
+                  </span>
 
-              <div className="rowTools" style={{ justifyContent: "space-between" }}>
-                <div className="searchWrap" style={{ flex: 1, maxWidth: "70%" }}>
-                  <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
-                  <input className="searchInput" value={tableSearch} onChange={(e) => setTableSearch(e.target.value)} placeholder="Search…" />
+                  {measureActive && userLoc && measureTo ? (
+                    <span className="chip" title="Distance from My Location">
+                      {formatDistance(measureDistance ?? NaN)}
+                    </span>
+                  ) : null}
                 </div>
 
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  {/* ✅ Mobile quick Layers button (so you don’t rely on a bottom FAB) */}
+                  <button
+                    className="btn btnGhost iconBtn"
+                    onClick={() => {
+                      setMobileTab("all");
+                      setMobilePanelOpen(true);
+                    }}
+                    title="Layers"
+                    type="button"
+                    style={{ display: isMobile ? "inline-flex" : "none" }}
+                  >
+                    <FontAwesomeIcon icon={faLayerGroup} />
+                  </button>
+
+                  <button
+                    className={`btn ${showBasemap ? "iconActive" : "btnGhost"}`}
+                    onClick={() => setShowBasemap((v) => !v)}
+                    title={showBasemap ? "Basemap ON" : "Basemap OFF"}
+                    type="button"
+                  >
+                    {showBasemap ? "Basemap: ON" : "Basemap: OFF"}
+                  </button>
+
+                  <button
+                    className={`btn iconBtn ${userLoc ? "iconActive" : "btnGhost"}`}
+                    onClick={requestUserLocation}
+                    disabled={locLoading}
+                    title={userLoc ? "My location is ON (tap to update)" : "Show my location"}
+                    type="button"
+                  >
+                    {locLoading ? <Ring size={16} /> : <FontAwesomeIcon icon={faLocationCrosshairs} />}
+                  </button>
+
+                  {measureActive ? (
+                    <button
+                      className="btn btnDanger"
+                      onClick={() => {
+                        clearMeasure();
+                        showToast("info", "Measure cleared.");
+                      }}
+                      title="Clear distance tool"
+                      type="button"
+                    >
+                      <FontAwesomeIcon icon={faXmark} />
+                      Clear
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="mapArea">
+                <div className="mapInner">
+                  <ResultMap
+                    key={mapKey}
+                    showBasemap={showBasemap}
+                    backgroundColor="#ffffff"
+                    onFeatureFidClick={handleFeatureClick}
+                    onMapMouseMove={onMapMouseMove}
+                    onMapClick={onMapClick}
+                    layers={mapLayersInput}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* DOCKED ATTRIBUTE TABLE */}
+            <div className="dock">
+              {!tableCollapsed && !isMobile ? (
+                <div
+                  className="dockResizer"
+                  onMouseDown={beginResizeDock}
+                  onTouchStart={(e) => {
+                    e.preventDefault();
+                    beginResizeDock();
+                  }}
+                  title="Drag to resize table"
+                  role="separator"
+                  aria-orientation="horizontal"
+                  aria-label="Resize table"
+                />
+              ) : null}
+
+              <div className="dockTop">
+                <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
+                  <div className="dockTitle" title={tableLayer?.name ?? "Attribute Table"}>
+                    <FontAwesomeIcon icon={faTable} />
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {tableLayer?.name ? `${tableLayer.name} — Attribute Table` : "Attribute Table"}
+                    </span>
+                  </div>
+
+                  {tableLayerId ? (
+                    <span className="pill" title="Selected rows">
+                      {tableSelectedSet.size}
+                    </span>
+                  ) : (
+                    <span className="pill" title="Tip">
+                      Open a layer → table
+                    </span>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <div className="searchWrap" style={{ width: "min(520px, 46vw)" }}>
+                    <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
+                    <input
+                      className="searchInput"
+                      value={tableSearch}
+                      onChange={(e) => setTableSearch(e.target.value)}
+                      placeholder="Search table…"
+                      disabled={!tableLayerId}
+                    />
+                  </div>
+
+                  <button
+                    className="btn btnGhost iconBtn"
+                    onClick={() => setTableCollapsed((v) => !v)}
+                    title={tableCollapsed ? "Expand table" : "Collapse table"}
+                    type="button"
+                  >
+                    <FontAwesomeIcon icon={tableCollapsed ? faChevronDown : faSliders} />
+                  </button>
+
                   <button
                     className="btn btnPrimary iconBtn"
                     onClick={() => tableLayerId && loadGeojson(tableLayerId, "full")}
@@ -2006,257 +2972,423 @@ const requestUserLocation = useCallback(() => {
                     {tableLayer?.loading ? <Ring size={16} /> : <FontAwesomeIcon icon={faArrowsRotate} />}
                   </button>
 
-                  <button className="btn btnGhost iconBtn" onClick={() => setTableOpen(false)} title="Close" type="button">
+                  <button
+                    className="btn btnDanger iconBtn"
+                    onClick={() => {
+                      setTableLayerId(null);
+                      setTableSearch("");
+                      setTableCollapsed(true);
+                    }}
+                    disabled={!tableLayerId}
+                    title="Close table"
+                    type="button"
+                  >
                     <FontAwesomeIcon icon={faXmark} />
                   </button>
                 </div>
               </div>
-            </div>
 
-            {!tableLayer || tableLayer.loading || !tableLayer.geojson || tableData.rows.length === 0 ? (
-              <div className="emptyState">
-                <Ring size={18} />
-              </div>
-            ) : (
-              <>
-                <div className="tableBar">
-                  <div className="pill">
-                    <b>{tableSelectedSet.size}</b> / <b>{tableMax}</b>
+              <div className={`dockBody ${tableCollapsed ? "collapsed" : ""}`}>
+                {!tableLayerId ? (
+                  <div style={{ padding: 16, color: "rgba(11,18,32,.65)", fontWeight: 520 }}>
+                    Open a layer’s table from <b>Selected</b>.
                   </div>
-
-                  <div className="smallHint" title="Filtered rows / current page">
-                    <b>{tableFilteredIdxs.length}</b>
-                    <span style={{ marginLeft: 10, opacity: 0.9 }}>
-                      Page <b>{tablePageSafe}</b> / <b>{tablePageCount}</b>
-                    </span>
+                ) : !tableLayer || tableLayer.loading || !tableLayer.geojson || tableData.rows.length === 0 ? (
+                  <div style={{ padding: 16, display: "flex", alignItems: "center", gap: 10 }}>
+                    <Ring size={18} />
+                    <div style={{ fontWeight: 520, color: "rgba(11,18,32,.65)" }}>Loading attributes…</div>
                   </div>
+                ) : (
+                  <>
+                    <div className="tableBar">
+                      <div className="pill">
+                        {tableSelectedSet.size} / {tableMax}
+                      </div>
 
+                      <div className="smallHint" title="Filtered rows / current page">
+                        {tableFilteredIdxs.length}
+                        <span style={{ marginLeft: 10, opacity: 0.9 }}>
+                          Page {tablePageSafe} / {tablePageCount}
+                        </span>
+                      </div>
 
-                  <div className="tableBarRight">
-                      {/* pagination controls */}
-  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-    <button
-      className="btn btnGhost miniIconBtn"
-      type="button"
-      onClick={() => setTablePage(1)}
-      disabled={tablePageSafe <= 1}
-      title="First page"
-    >
-      {"<<"}
-    </button>
+                      <div className="tableBarRight">
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <button className="btn btnGhost miniIconBtn" type="button" onClick={() => setTablePage(1)} disabled={tablePageSafe <= 1} title="First">
+                            {"<<"}
+                          </button>
+                          <button className="btn btnGhost miniIconBtn" type="button" onClick={() => setTablePage((p) => Math.max(1, p - 1))} disabled={tablePageSafe <= 1} title="Prev">
+                            {"<"}
+                          </button>
+                          <button className="btn btnGhost miniIconBtn" type="button" onClick={() => setTablePage((p) => Math.min(tablePageCount, p + 1))} disabled={tablePageSafe >= tablePageCount} title="Next">
+                            {">"}
+                          </button>
+                          <button className="btn btnGhost miniIconBtn" type="button" onClick={() => setTablePage(tablePageCount)} disabled={tablePageSafe >= tablePageCount} title="Last">
+                            {">>"}
+                          </button>
 
-    <button
-      className="btn btnGhost miniIconBtn"
-      type="button"
-      onClick={() => setTablePage((p) => Math.max(1, p - 1))}
-      disabled={tablePageSafe <= 1}
-      title="Previous page"
-    >
-      {"<"}
-    </button>
+                          <select
+                            value={tablePageSize}
+                            onChange={(e) => {
+                              const next = Math.max(1, Number(e.target.value) || 50);
+                              setTablePageSize(next);
+                              setTablePage(1);
+                            }}
+                            className="btn"
+                            style={{ padding: "8px 10px", borderRadius: 14 }}
+                            title="Rows per page"
+                          >
+                            <option value={50}>50</option>
+                            <option value={100}>100</option>
+                            <option value={200}>200</option>
+                            <option value={500}>500</option>
+                          </select>
+                        </div>
 
-    <button
-      className="btn btnGhost miniIconBtn"
-      type="button"
-      onClick={() => setTablePage((p) => Math.min(tablePageCount, p + 1))}
-      disabled={tablePageSafe >= tablePageCount}
-      title="Next page"
-    >
-      {">"}
-    </button>
+                        <div className="colorPickWrap" title="Pick color">
+                          <label className="colorCircle">
+                            <span className="colorSwatch" style={{ background: tableColor }} />
+                            <input className="hiddenColorInput" type="color" value={tableColor} onChange={(e) => setTableColor(e.target.value)} aria-label="Pick color" />
+                          </label>
+                        </div>
 
-    <button
-      className="btn btnGhost miniIconBtn"
-      type="button"
-      onClick={() => setTablePage(tablePageCount)}
-      disabled={tablePageSafe >= tablePageCount}
-      title="Last page"
-    >
-      {">>"}
-    </button>
+                        <button className="btn btnPrimary miniIconBtn" onClick={() => tableLayerId && colorRows(tableLayerId, idxsToColorNow, tableColor)} disabled={!tableLayerId || idxsToColorNow.length === 0} title="Color selected" type="button">
+                          <FontAwesomeIcon icon={faPalette} />
+                        </button>
 
-    <select
-      value={tablePageSize}
-      onChange={(e) => {
-        const next = Math.max(1, Number(e.target.value) || 50);
-        setTablePageSize(next);
-        setTablePage(1);
-      }}
-      className="btn"
-      style={{ padding: "8px 10px", borderRadius: 14 }}
-      title="Rows per page"
-    >
-      <option value={50}>50</option>
-      <option value={100}>100</option>
-      <option value={200}>200</option>
-      <option value={500}>500</option>
-    </select>
-  </div>
+                        <button className="btn btnGhost miniIconBtn" onClick={() => tableLayerId && clearColorForRows(tableLayerId, idxsToClearColorNow)} disabled={!tableLayerId || idxsToClearColorNow.length === 0} title="Clear selected color" type="button">
+                          <FontAwesomeIcon icon={faEraser} />
+                        </button>
 
-                    <div className="colorPickWrap" title="Pick color">
-                      <label className="colorCircle">
-                        <span className="colorSwatch" style={{ background: tableColor }} />
-                        <input className="hiddenColorInput" type="color" value={tableColor} onChange={(e) => setTableColor(e.target.value)} aria-label="Pick color" />
-                      </label>
+                        <button className="btn btnDanger miniIconBtn" onClick={() => tableLayerId && clearSelectedFeaturesInLayer(tableLayerId)} disabled={!tableLayerId || tableSelectedSet.size === 0} title="Clear selection" type="button">
+                          <FontAwesomeIcon icon={faXmark} />
+                        </button>
+
+                        <button className="btn btnDanger miniIconBtn" onClick={() => tableLayerId && clearAllColorsForLayer(tableLayerId)} disabled={!tableLayerId || Object.keys(tableColorOverrides).length === 0} title="Clear all colors" type="button">
+                          <FontAwesomeIcon icon={faEyeSlash} />
+                        </button>
+                      </div>
                     </div>
 
-                    <button
-                      className="btn btnPrimary miniIconBtn"
-                      onClick={() => {
-                        if (!tableLayerId) return;
-                        colorRows(tableLayerId, idxsToColorNow, tableColor);
-                      }}
-                      disabled={!tableLayerId || idxsToColorNow.length === 0}
-                      title="Color selected"
-                      type="button"
-                    >
-                      <FontAwesomeIcon icon={faPalette} />
-                    </button>
-
-                    <button
-                      className="btn btnGhost miniIconBtn"
-                      onClick={() => {
-                        if (!tableLayerId) return;
-                        clearColorForRows(tableLayerId, idxsToClearColorNow);
-                      }}
-                      disabled={!tableLayerId || idxsToClearColorNow.length === 0}
-                      title="Clear selected color"
-                      type="button"
-                    >
-                      <FontAwesomeIcon icon={faEraser} />
-                    </button>
-
-                    <button
-                      className="btn btnDanger miniIconBtn"
-                      onClick={() => tableLayerId && clearSelectedFeaturesInLayer(tableLayerId)}
-                      disabled={!tableLayerId || tableSelectedSet.size === 0}
-                      title="Clear selection"
-                      type="button"
-                    >
-                      <FontAwesomeIcon icon={faXmark} />
-                    </button>
-
-                    <button
-                      className="btn btnDanger miniIconBtn"
-                      onClick={() => tableLayerId && clearAllColorsForLayer(tableLayerId)}
-                      disabled={!tableLayerId || Object.keys(tableColorOverrides).length === 0}
-                      title="Clear all colors"
-                      type="button"
-                    >
-                      <FontAwesomeIcon icon={faEyeSlash} />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="tableWrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th style={{ width: 60 }}>
-                          <input
-                            ref={pickAllRef}
-                            className="rowChk"
-                            type="checkbox"
-                            checked={allFilteredSelected}
-                            onChange={() => {
-                              if (!tableLayerId) return;
-                              if (tableFilteredIdxs.length === 0) return;
-
-                              if (allFilteredSelected) {
-                                setSelectedFeatureIdxByLayer((prev) => {
-                                  const cur = new Set(prev[tableLayerId] ?? []);
-                                  for (const idx of tableFilteredIdxs) cur.delete(idx);
-                                  return { ...prev, [tableLayerId]: cur };
-                                });
-                              } else {
-                                setSelectedFeatureIdxByLayer((prev) => {
-                                  const cur = new Set(prev[tableLayerId] ?? []);
-                                  for (const idx of tableFilteredIdxs) cur.add(idx);
-                                  return { ...prev, [tableLayerId]: cur };
-                                });
-                              }
-                            }}
-                            aria-label="Select all filtered rows across all pages"
-                            title="Select all filtered (all pages)"
-
-                          />
-                        </th>
-
-                        <th style={{ width: 150 }}>Row</th>
-
-                        {tableData.columns.map((c) => (
-                          <th key={c}>{c}</th>
-                        ))}
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                    {tablePagedRows.map((r: any) => {
-                        const idx = Number(r.__idx);
-                        const checked = tableLayerId ? selectedFeatureIdxByLayer[tableLayerId]?.has(idx) ?? false : false;
-
-                        const override = Number.isFinite(idx) ? tableColorOverrides[idx] : undefined;
-                        const rowColor = override ?? DEFAULT_LAYER_COLOR;
-
-                        return (
-                          <tr key={idx} className={checked ? "rowSelected" : ""}>
-                            <td>
+                    <div className="tableWrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th style={{ width: 60 }}>
                               <input
+                                ref={pickAllRef}
                                 className="rowChk"
                                 type="checkbox"
-                                checked={checked}
-                                onChange={(e) => tableLayerId && toggleFeatureSelection(tableLayerId, idx, e.target.checked)}
-                                aria-label={`Select row ${idx + 1}`}
-                              />
-                            </td>
-
-                            <td style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                              <div className="colorPickWrap" title={override ? "Override color" : "Default color"}>
-                                <label className="colorCircle" style={{ width: 32, height: 32 }}>
-                                  <span className="colorSwatch" style={{ background: rowColor }} />
-                                  <input
-                                    className="hiddenColorInput"
-                                    type="color"
-                                    value={override ?? DEFAULT_LAYER_COLOR}
-                                    onChange={(e) => {
-                                      if (!tableLayerId) return;
-                                      if (!Number.isFinite(idx)) return;
-                                      colorRow(tableLayerId, idx, e.target.value);
-                                    }}
-                                    aria-label="Set row color"
-                                  />
-                                </label>
-                              </div>
-
-                              <button
-                                className="btn btnGhost miniIconBtn"
-                                onClick={() => {
+                                checked={allFilteredSelected}
+                                onChange={() => {
                                   if (!tableLayerId) return;
-                                  if (!Number.isFinite(idx)) return;
-                                  clearRowColor(tableLayerId, idx);
+                                  if (tableFilteredIdxs.length === 0) return;
+
+                                  if (allFilteredSelected) {
+                                    setSelectedFeatureIdxByLayer((prev) => {
+                                      const cur = new Set(prev[tableLayerId] ?? []);
+                                      for (const idx of tableFilteredIdxs) cur.delete(idx);
+                                      return { ...prev, [tableLayerId]: cur };
+                                    });
+                                  } else {
+                                    setSelectedFeatureIdxByLayer((prev) => {
+                                      const cur = new Set(prev[tableLayerId] ?? []);
+                                      for (const idx of tableFilteredIdxs) cur.add(idx);
+                                      return { ...prev, [tableLayerId]: cur };
+                                    });
+                                  }
                                 }}
-                                disabled={!override}
-                                title="Clear row color"
-                                type="button"
-                              >
-                                <FontAwesomeIcon icon={faEraser} />
-                              </button>
-                            </td>
+                                aria-label="Select all filtered rows across all pages"
+                                title="Select all filtered (all pages)"
+                              />
+                            </th>
+
+                            <th style={{ width: 150 }}>Row</th>
 
                             {tableData.columns.map((c) => (
-                              <td key={c}>{stringifyCell(r?.[c])}</td>
+                              <th key={c}>{c}</th>
                             ))}
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
+                        </thead>
+
+                        <tbody>
+                          {tablePagedRows.map((r: any) => {
+                            const idx = Number(r.__idx);
+                            const checked = tableLayerId ? selectedFeatureIdxByLayer[tableLayerId]?.has(idx) ?? false : false;
+
+                            const override = Number.isFinite(idx) ? tableColorOverrides[idx] : undefined;
+                            const rowColor = override ?? DEFAULT_LAYER_COLOR;
+
+                            return (
+                              <tr key={idx} className={checked ? "rowSelected" : ""}>
+                                <td>
+                                  <input
+                                    className="rowChk"
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={(e) => tableLayerId && toggleFeatureSelection(tableLayerId, idx, e.target.checked)}
+                                    aria-label={`Select row ${idx + 1}`}
+                                  />
+                                </td>
+
+                                <td className="rowActionsCell">
+                                  <div className="rowActions">
+                                    <div className="colorPickWrap" title={override ? "Override color" : "Default color"}>
+                                      <label className="colorCircle" style={{ width: 32, height: 32 }}>
+                                        <span className="colorSwatch" style={{ background: rowColor }} />
+                                        <input
+                                          className="hiddenColorInput"
+                                          type="color"
+                                          value={override ?? DEFAULT_LAYER_COLOR}
+                                          onChange={(e) => {
+                                            if (!tableLayerId) return;
+                                            if (!Number.isFinite(idx)) return;
+                                            colorRow(tableLayerId, idx, e.target.value);
+                                          }}
+                                          aria-label="Set row color"
+                                        />
+                                      </label>
+                                    </div>
+
+                                    <button
+                                      className="btn btnGhost miniIconBtn"
+                                      onClick={() => tableLayerId && Number.isFinite(idx) && clearRowColor(tableLayerId, idx)}
+                                      disabled={!override}
+                                      title="Clear row color"
+                                      type="button"
+                                    >
+                                      <FontAwesomeIcon icon={faEraser} />
+                                    </button>
+                                  </div>
+                                </td>
+
+                                {tableData.columns.map((c) => {
+                                  const v = stringifyCell(r?.[c]);
+                                  const cls =
+                                    c === "__fid" ? "col-fid" : c === "__idx" ? "col-idx" : "";
+                                  return (
+                                    <td key={c} className={cls}>
+                                      {v}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </div>
-      ) : null}
+
+        {/* MOBILE FAB (only when safe; never covers table now) */}
+        {/* {showMobileFab ? (
+          <button
+            className="fab"
+            onClick={() => {
+              setMobileTab("all");
+              setMobilePanelOpen(true);
+            }}
+            aria-label="Open layers"
+            type="button"
+          >
+            <span className="fabIcon">
+              <FontAwesomeIcon icon={faLayerGroup} />
+            </span>
+            <span className="fabBadge" title="Selected layers">
+              {visibleCount}
+            </span>
+          </button>
+        ) : null} */}
+
+        {/* MOBILE SHEET (tabs: All / Selected) */}
+        {mobilePanelOpen ? (
+          <div className="sheetOverlay" onClick={() => setMobilePanelOpen(false)} role="dialog" aria-modal="true">
+            <div className="sheet" onClick={(e) => e.stopPropagation()}>
+              <div className="grab" />
+              <div className="sheetTop">
+                <div className="sheetTitle">
+                  <FontAwesomeIcon icon={faLayerGroup} />
+                  Layers
+                  <span className="pill" style={{ padding: "5px 9px" }} title="Selected">
+                    {visibleCount}
+                  </span>
+                </div>
+
+                <button className="btn btnGhost iconBtn" onClick={() => setMobilePanelOpen(false)} title="Close" type="button">
+                  <FontAwesomeIcon icon={faChevronDown} />
+                </button>
+              </div>
+
+              <div className="tabRow">
+                <button className={`tab ${mobileTab === "all" ? "active" : ""}`} onClick={() => setMobileTab("all")} type="button">
+                  All Layers ({filtered.length})
+                </button>
+                <button className={`tab ${mobileTab === "selected" ? "active" : ""}`} onClick={() => setMobileTab("selected")} type="button">
+                  Selected ({visibleCount})
+                </button>
+              </div>
+
+              <div className="panelHead" style={{ borderRadius: 0 }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <div className="searchWrap" style={{ flex: 1 }}>
+                    <FontAwesomeIcon icon={faMagnifyingGlass} opacity={0.8} />
+                    <input className="searchInput" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search layers…" />
+                    {isFiltering ? (
+                      <button className="btn btnGhost iconBtn" onClick={() => setSearch("")} title="Clear" type="button">
+                        <FontAwesomeIcon icon={faXmark} />
+                      </button>
+                    ) : null}
+                  </div>
+
+                  <button className="btn btnPrimary iconBtn" onClick={refreshList} disabled={loadingList} title="Refresh" type="button">
+                    {loadingList ? <Ring size={16} /> : <FontAwesomeIcon icon={faRotateRight} />}
+                  </button>
+
+                  <button
+                    className="btn btnDanger iconBtn"
+                    onClick={() => (isFiltering ? selectFiltered(false, filteredIds) : clearAll())}
+                    disabled={isFiltering ? !hasAnyVisibleFiltered : visibleCount === 0}
+                    title="Clear selected"
+                    type="button"
+                  >
+                    <FontAwesomeIcon icon={faEyeSlash} />
+                  </button>
+                </div>
+
+                {isFiltering ? (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button className="btn btnPrimary" onClick={() => selectFiltered(!hasAllVisibleFiltered, filteredIds)} disabled={filtered.length === 0} title="Select filtered" type="button">
+                      <FontAwesomeIcon icon={hasAllVisibleFiltered ? faCheckSquare : faSquare} />
+                      Select filtered
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+
+              <div style={{ padding: 12, minHeight: 0, overflow: "auto" }}>
+              {mobileTab === "all" ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {filtered.length === 0 ? (
+                    <div className="pill" style={{ alignSelf: "flex-start" }}>
+                      No results
+                    </div>
+                  ) : (
+                    groupedFiltered.map((g) => {
+                      const isOpen = groupOpen[g.key] ?? false;
+
+                      return (
+                        <div key={g.key} className="groupBlock">
+                          {/* GROUP HEADER */}
+                          <button
+                            type="button"
+                            onClick={() => toggleGroup(g.key)}   // ✅ use accordion behavior
+                            className="groupHeader"
+                          >
+                            <div className="groupLeft">
+                              <span className="groupTitle">{g.key === "OTHERS" ? "Others" : g.key}</span>
+                              <span className="groupBadge">{g.items.length}</span>
+                            </div>
+
+                            <span className="groupToggle" aria-hidden="true">
+                              <FontAwesomeIcon icon={isOpen ? faChevronDown : faChevronRight} />
+                            </span>
+                          </button>
+
+                          {/* GROUP ITEMS */}
+                          {isOpen ? (
+                            <div className="groupItems" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                              {g.items.map((l) => {
+                                const isOn = !!l.visible;
+
+                                return (
+                                  <div key={l.id} className="miniItem">
+                                    <button className="miniNameBtn" onClick={() => addLayerFromAllList(l.id)} type="button">
+                                      <div className="miniName">{l.name}</div>
+                                      <div className="miniMeta">
+                                        {l.geom_type ?? "-"} • SRID {l.srid ?? "-"}
+                                      </div>
+                                    </button>
+
+                                    <div className="miniActions">
+                                      {isOn ? <span className="badgeOn">Selected</span> : null}
+                                      <button
+                                        className="btn btnPrimary miniIconBtn"
+                                        onClick={() => toggleLayer(l.id, !isOn)}
+                                        disabled={l.loading}
+                                        title={isOn ? "Remove" : "Add"}
+                                        type="button"
+                                      >
+                                        {l.loading ? <Ring size={14} /> : <FontAwesomeIcon icon={isOn ? faMinus : faPlus} />}
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {selectedLayersOrdered.length === 0 ? (
+                      <div style={{ color: "rgba(11,18,32,.65)", fontWeight: 520 }}>
+                        No selected layers yet. Go to <b>All Layers</b> and tap a layer name.
+                      </div>
+                    ) : (
+                      selectedLayersOrdered.map((l) => (
+                        <div key={l.id} className={`miniItem ${isNarrowSidebar ? "stacked" : ""}`}>
+                          <button
+                            className="miniNameBtn"
+                            onClick={() => (l.id !== MY_LOC_LAYER_ID && l.id !== MEASURE_LAYER_ID ? openAttributeTable(l.id) : undefined)}
+                            type="button"
+                            style={{ cursor: l.id === MY_LOC_LAYER_ID || l.id === MEASURE_LAYER_ID ? "default" : "pointer" }}
+                          >
+                            <div className="miniName">{l.name}</div>
+                            <div className="miniMeta">
+                              Order #{layerOrderNumberById[l.id] ?? "-"} • {l.geom_type ?? "-"}
+                            </div>
+                          </button>
+
+                          <div className="miniActions">
+                            <button className="btn btnGhost miniIconBtn" onClick={() => moveLayer(l.id, "top")} title="Top" type="button">
+                              <FontAwesomeIcon icon={faAnglesUp} />
+                            </button>
+                            <button className="btn btnGhost miniIconBtn" onClick={() => moveLayer(l.id, "up")} title="Up" type="button">
+                              <FontAwesomeIcon icon={faArrowUp} />
+                            </button>
+                            <button className="btn btnGhost miniIconBtn" onClick={() => moveLayer(l.id, "down")} title="Down" type="button">
+                              <FontAwesomeIcon icon={faArrowDown} />
+                            </button>
+                            <button className="btn btnGhost miniIconBtn" onClick={() => moveLayer(l.id, "bottom")} title="Bottom" type="button">
+                              <FontAwesomeIcon icon={faAnglesDown} />
+                            </button>
+                            {l.id !== MY_LOC_LAYER_ID && l.id !== MEASURE_LAYER_ID ? (
+                              <button className="btn btnGhost miniIconBtn" onClick={() => openAttributeTable(l.id)} title="Table" type="button">
+                                <FontAwesomeIcon icon={faTable} />
+                              </button>
+                            ) : null}
+                            <button className="btn btnDanger miniIconBtn" onClick={() => toggleLayer(l.id, false)} title="Remove" type="button">
+                              <FontAwesomeIcon icon={faXmark} />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
