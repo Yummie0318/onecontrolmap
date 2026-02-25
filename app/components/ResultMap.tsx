@@ -503,7 +503,8 @@ export default function ResultMap(props: Props) {
         <InvalidateOnBasemapToggle showBasemap={showBasemap} />
 
         {/* ✅ forward map move/click */}
-        <ForwardMapEvents onMapMouseMove={props.onMapMouseMove} onMapClick={props.onMapClick} />
+        {/* <ForwardMapEvents onMapMouseMove={
+        props.onMapMouseMove} onMapClick={props.onMapClick} /> */}
 
         {/* ✅ fly to "My Location" */}
         <FlyToMyLocation layers={orderedLayers} />
