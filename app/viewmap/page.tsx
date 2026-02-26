@@ -103,12 +103,15 @@ function extractAttributesWithIds(fc: any): {
   keySet.add("__fid");
   for (const r of rows) for (const k of Object.keys(r)) keySet.add(k);
 
-  const internal = ["__idx", "__fid"];
+  // ✅ keep __fid in rows for internal logic, but DO NOT show it as a table column
+  const internalVisible = ["__idx"];          // shown
+  const internalHidden = ["__fid"];           // hidden
+
   const rest = Array.from(keySet)
-    .filter((c) => !internal.includes(c))
+    .filter((c) => !internalVisible.includes(c) && !internalHidden.includes(c))
     .sort((a, b) => a.localeCompare(b));
 
-  return { columns: [...internal, ...rest], rows };
+  return { columns: [...internalVisible, ...rest], rows };
 }
 
 function stringifyCell(v: any) {
@@ -3169,7 +3172,7 @@ const groupedFiltered = useMemo(() => {
 
                             <th style={{ width: 150 }}>Row</th>
 
-                            {tableData.columns.map((c) => (
+                            {tableData.columns.filter((c) => c !== "__fid").map((c) => (
                               <th key={c}>{c}</th>
                             ))}
                           </tr>
@@ -3226,7 +3229,7 @@ const groupedFiltered = useMemo(() => {
                                   </div>
                                 </td>
 
-                                {tableData.columns.map((c) => {
+                                {tableData.columns.filter((c) => c !== "__fid").map((c) => {
                                   const v = stringifyCell(r?.[c]);
                                   const cls =
                                     c === "__fid" ? "col-fid" : c === "__idx" ? "col-idx" : "";
