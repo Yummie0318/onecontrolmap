@@ -674,16 +674,34 @@ export default function ResultMap(props: Props) {
                     } catch {}
                   }
 
-                  leafletLayer.on?.("click", () => {
+                  // inside onEachFeature={(feature, leafletLayer) => { ... }}
+
+                  leafletLayer.on?.("click", (e: any) => {
+                    // ✅ IMPORTANT: prevent map "click" from firing (so distance measure won't start)
+                    // only for My Location / dot markers
+                    const markerType = feature?.properties?.__marker;
+                    const isDot = markerType === "dot";
+                    const isMyLocOrDot = isMyLocLayer || isDot;
+
+                    if (isMyLocOrDot) {
+                      try {
+                        L.DomEvent.stopPropagation(e);
+                        L.DomEvent.preventDefault(e);
+                      } catch {}
+                    }
+
                     const fid = getFeatureFid(feature);
                     if (fid != null && props.onFeatureFidClick) props.onFeatureFidClick(String(fid));
 
-                    if (isMyLocLayer || isDot) {
+                    if (isMyLocOrDot) {
                       try {
                         leafletLayer.bringToFront?.();
                       } catch {}
                     }
+
                   });
+
+
                 }}
               />
             </AnyPane>
