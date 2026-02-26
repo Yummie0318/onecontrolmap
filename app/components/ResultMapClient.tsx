@@ -1,3 +1,4 @@
+// C:\Users\Yummie03\Desktop\onemap\app\components\ResultMapClient.tsx
 "use client";
 
 import dynamic from "next/dynamic";
@@ -11,6 +12,11 @@ export type MapLayerInput = {
   orderNo?: number;
 };
 
+export type ZoomToRequest =
+  | { type: "layer"; layerId: string; nonce: number }
+  | { type: "location"; nonce: number }
+  | null;
+
 export type ResultMapProps = {
   geojson?: any | null;
   layers?: MapLayerInput[];
@@ -21,6 +27,9 @@ export type ResultMapProps = {
   // ✅ map events
   onMapMouseMove?: (lat: number, lng: number) => void;
   onMapClick?: (lat: number, lng: number) => void;
+
+  // ✅ NEW: request zoom action from parent
+  zoomTo?: ZoomToRequest;
 
   showBasemap?: boolean;
   backgroundColor?: string;
@@ -107,6 +116,7 @@ export default function ResultMapClient(props: ResultMapProps) {
       onFeatureFidClick={props.onFeatureFidClick}
       onMapMouseMove={props.onMapMouseMove}
       onMapClick={props.onMapClick}
+      zoomTo={props.zoomTo}   // ✅ NEW: forward zoom request
     />
   );
 }

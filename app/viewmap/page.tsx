@@ -143,7 +143,8 @@ function getLayerGroup(name: string) {
   if (n.startsWith("CADT")) return "CADT";
   if (n.startsWith("CADC")) return "CADC";
   if (n.startsWith("CBFMA")) return "CBFMA";
-  if (n.startsWith("PA")) return "PA";
+  if (n.startsWith("PA_")) return "PA";
+  if (n.startsWith("PACBRMA")) return "PACBRMA";
   if (n.startsWith("CSC")) return "CSC";
   if (n.startsWith("FLAG_")) return "FLAG";
   if (n.startsWith("FLAGT_")) return "FLAGT";
@@ -170,6 +171,7 @@ const GROUP_ORDER = [
   "GSUP",
   "NGP",
   "PA",
+  "PACBRMA",
   "SIFMA",
   "SLUP",
   "TFLA",
@@ -324,6 +326,14 @@ export default function ViewMapPage() {
       return next;
     });
   }, []);
+
+
+
+  const [zoomTo, setZoomTo] = useState<
+  | { type: "layer"; layerId: string; nonce: number }
+  | { type: "location"; nonce: number }
+  | null
+  >(null);
 
 
   useEffect(() => {
@@ -485,6 +495,7 @@ export default function ViewMapPage() {
         ensureInDrawOrder(MY_LOC_LAYER_ID, true);
         setDesktopTab("selected");
         showToast("success", "Location found.");
+        requestZoomToLocation(); // ✅ ADD THIS
         setLocLoading(false);
       },
       (err) => {
@@ -506,6 +517,14 @@ export default function ViewMapPage() {
     );
   }, [showToast, ensureInDrawOrder]);
 
+
+
+  
+  const requestZoomToLocation = useCallback(() => {
+    setZoomTo({ type: "location", nonce: Date.now() });
+  }, []);
+
+  
   // ✅ attribute table
   const [tableOpen, setTableOpen] = useState(true);
   const [tableCollapsed, setTableCollapsed] = useState(true);
@@ -623,6 +642,27 @@ export default function ViewMapPage() {
     },
     [showToast]
   );
+
+
+  
+
+  const requestZoomToLayer = useCallback(
+    async (layerId: string) => {
+      // if geojson missing, load it first
+      const cur = layersRef.current.find((l) => l.id === layerId);
+      if (!cur) return;
+  
+      if (!cur.geojson && !cur.loading) {
+        await loadGeojson(layerId, "full");
+      } else if (cur.geojson && cur._geoMode !== "full" && !cur.loading) {
+        await loadGeojson(layerId, "full");
+      }
+  
+      setZoomTo({ type: "layer", layerId, nonce: Date.now() });
+    },
+    [loadGeojson]
+  );
+  
 
   const toggleLayer = useCallback(
     async (layerId: string, nextVisible: boolean) => {
@@ -761,6 +801,23 @@ export default function ViewMapPage() {
     },
     [loadGeojson]
   );
+
+  // ✅ when user clicks a layer in Selected: zoom + auto-open table
+  const activateSelectedLayer = useCallback(
+    async (layerId: string) => {
+      if (layerId === MY_LOC_LAYER_ID) {
+        if (userLoc) requestZoomToLocation();
+        else showToast("info", "Click the location button first.");
+        return;
+      }
+      if (layerId === MEASURE_LAYER_ID) return;
+
+      await requestZoomToLayer(layerId); // ensures geojson full + zoom request
+      openAttributeTable(layerId);       // opens + loads attribute table
+    },
+    [requestZoomToLayer, openAttributeTable, userLoc, requestZoomToLocation, showToast]
+  );
+
 
   const toggleFeatureSelection = useCallback((layerId: string, idx: number, next: boolean) => {
     setSelectedFeatureIdxByLayer((prev) => {
@@ -1287,12 +1344,18 @@ const groupedFiltered = useMemo(() => {
     async (layerId: string) => {
       const cur = layersRef.current.find((l) => l.id === layerId);
       if (!cur) return;
+  
+      // if already visible, just open the table
       if (cur.visible) {
         openAttributeTable(layerId);
+        setDesktopTab("selected");
         return;
       }
+  
+      // turn it on, then auto-open table
       await toggleLayer(layerId, true);
       setDesktopTab("selected");
+      openAttributeTable(layerId);
     },
     [toggleLayer, openAttributeTable]
   );
@@ -2713,8 +2776,8 @@ const groupedFiltered = useMemo(() => {
               ) : (
                 <>
                   {selectedLayersOrdered.length === 0 ? (
-                    <div style={{ padding: 10, color: "rgba(11,18,32,.65)", fontWeight: 520 }}>
-                      Select a layer from <b>All</b> first.
+                    <div style={{ padding: 10, color: "rgba(11,18,32,.65)", fontWeight: 500 }}>
+                      Select a layer from List first.
                     </div>
                   ) : (
                     selectedLayersOrdered.map((l) => {
@@ -2728,7 +2791,7 @@ const groupedFiltered = useMemo(() => {
                         <div key={l.id} className={`miniItem ${isNarrowSidebar ? "stacked" : ""}`}>
                           <button
                             className="miniNameBtn"
-                            onClick={() => (!isPseudo ? openAttributeTable(l.id) : undefined)}
+                            onClick={() => activateSelectedLayer(l.id)}
                             title={isPseudo ? "Pseudo layer" : "Open attribute table"}
                             type="button"
                             style={{ cursor: isPseudo ? "default" : "pointer" }}
@@ -2771,9 +2834,9 @@ const groupedFiltered = useMemo(() => {
                                   {l.loading ? <Ring size={14} /> : <FontAwesomeIcon icon={faArrowsRotate} />}
                                 </button>
 
-                                <button className="btn btnGhost miniIconBtn" onClick={() => openAttributeTable(l.id)} title="Table" type="button">
+                                {/* <button className="btn btnGhost miniIconBtn" onClick={() => openAttributeTable(l.id)} title="Table" type="button">
                                   <FontAwesomeIcon icon={faTable} />
-                                </button>
+                                </button> */}
                               </>
                             ) : null}
 
@@ -2899,6 +2962,7 @@ const groupedFiltered = useMemo(() => {
                     onMapMouseMove={onMapMouseMove}
                     onMapClick={onMapClick}
                     layers={mapLayersInput}
+                    zoomTo={zoomTo}       
                   />
                 </div>
               </div>
@@ -2948,7 +3012,7 @@ const groupedFiltered = useMemo(() => {
                       className="searchInput"
                       value={tableSearch}
                       onChange={(e) => setTableSearch(e.target.value)}
-                      placeholder="Search table…"
+                      placeholder="Search data in table…"
                       disabled={!tableLayerId}
                     />
                   </div>
@@ -3347,7 +3411,7 @@ const groupedFiltered = useMemo(() => {
                         <div key={l.id} className={`miniItem ${isNarrowSidebar ? "stacked" : ""}`}>
                           <button
                             className="miniNameBtn"
-                            onClick={() => (l.id !== MY_LOC_LAYER_ID && l.id !== MEASURE_LAYER_ID ? openAttributeTable(l.id) : undefined)}
+                            onClick={() => activateSelectedLayer(l.id)}
                             type="button"
                             style={{ cursor: l.id === MY_LOC_LAYER_ID || l.id === MEASURE_LAYER_ID ? "default" : "pointer" }}
                           >

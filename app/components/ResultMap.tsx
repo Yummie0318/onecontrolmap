@@ -1,3 +1,4 @@
+// C:\Users\Yummie03\Desktop\onemap\app\components\ResultMap.tsx
 "use client";
 
 import {
@@ -18,7 +19,7 @@ import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
 import markerIcon from "leaflet/dist/images/marker-icon.png";
 import markerShadow from "leaflet/dist/images/marker-shadow.png";
 
-import type { ResultMapProps, MapLayerInput } from "./ResultMapClient";
+import type { ResultMapProps, MapLayerInput, ZoomToRequest } from "./ResultMapClient";
 
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -48,8 +49,8 @@ function safeInvalidate(map: any) {
 }
 
 /**
- * ✅ NEW: invalidateSize whenever the MAP CONTAINER changes size
- * This fixes resizing issues when:
+ * ✅ invalidateSize whenever the MAP CONTAINER changes size
+ * fixes resizing issues when:
  * - sidebar width changes
  * - dock/table height changes
  * - mobile bottom sheet opens/closes
@@ -64,7 +65,6 @@ function InvalidateOnContainerResize({ containerRef }: { containerRef: React.Ref
     let raf: number | null = null;
 
     const trigger = () => {
-      // RAF throttle so it stays smooth while dragging
       if (raf != null) return;
       raf = window.requestAnimationFrame(() => {
         raf = null;
@@ -72,7 +72,6 @@ function InvalidateOnContainerResize({ containerRef }: { containerRef: React.Ref
       });
     };
 
-    // Initial invalidate (mount)
     trigger();
 
     let ro: ResizeObserver | null = null;
@@ -80,11 +79,9 @@ function InvalidateOnContainerResize({ containerRef }: { containerRef: React.Ref
       ro = new ResizeObserver(() => trigger());
       ro.observe(el);
     } catch {
-      // Fallback for very old browsers: listen to window resize
       window.addEventListener("resize", trigger);
     }
 
-    // Also listen to orientation change (mobile)
     window.addEventListener("orientationchange", trigger);
 
     return () => {
@@ -211,10 +208,10 @@ function pointStyle(color: string) {
 function pointDotStyle(color: string) {
   return {
     radius: 8,
-    color: "#ffffff",        // ✅ white outline (always visible)
+    color: "#ffffff",
     weight: 2.5,
     opacity: 1,
-    fillColor: color,        // ✅ red fill (or any __color)
+    fillColor: color,
     fillOpacity: 1,
   } as L.CircleMarkerOptions;
 }
@@ -310,6 +307,83 @@ function extractMyLocationLatLngFromLayer(layer: MapLayerInput): { lat: number; 
   return null;
 }
 
+/**
+ * ✅ NEW: Zoom controller (triggered by page.tsx via props.zoomTo)
+ * - zoom to selected layer bounds
+ * - zoom to My Location dot
+ */
+function ZoomController({ zoomTo, layers }: { zoomTo: ZoomToRequest; layers: MapLayerInput[] }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!zoomTo) return;
+
+    // 🔥 Zoom to My Location dot
+    if (zoomTo.type === "location") {
+      const myLayer = layers.find((l) => l.id === MY_LOC_LAYER_ID) ?? null;
+      const p = myLayer ? extractMyLocationLatLngFromLayer(myLayer) : null;
+      if (!p) return;
+
+      const current = map.getZoom?.() ?? 0;
+      const targetZoom = Math.max(current, 16);
+
+      try {
+        map.flyTo([p.lat, p.lng], targetZoom, { animate: true, duration: 0.6 });
+      } catch {
+        try {
+          map.setView([p.lat, p.lng], targetZoom);
+        } catch {}
+      }
+
+      // ensure tiles render clean
+      const t1 = setTimeout(() => safeInvalidate(map), 0);
+      const t2 = setTimeout(() => safeInvalidate(map), 180);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+      };
+    }
+
+    // 🔥 Zoom to selected layer extent
+    if (zoomTo.type === "layer") {
+      const target = layers.find((l) => l.id === zoomTo.layerId) ?? null;
+      if (!target?.geojson) return;
+
+      const safe = safeGeojsonForBounds(target.geojson);
+      if (!safe) return;
+
+      try {
+        const gj = L.geoJSON(safe);
+        const b = gj.getBounds();
+        if (b?.isValid()) {
+          map.fitBounds(b.pad(0.12), { animate: true, duration: 0.6 });
+        }
+      } catch {}
+
+      const t1 = setTimeout(() => safeInvalidate(map), 0);
+      const t2 = setTimeout(() => safeInvalidate(map), 180);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+      };
+    }
+  }, [
+    // only react when request changes
+    (zoomTo as any)?.type,
+    (zoomTo as any)?.layerId,
+    (zoomTo as any)?.nonce,
+    layers,
+    map,
+  ]);
+
+  return null;
+}
+
+/**
+ * (kept) fly-to behavior when "My Location" layer coords change
+ * NOTE: this is separate from ZoomController "location" request.
+ * You can keep it if you like the auto-fly on location update.
+ */
 function FlyToMyLocation({ layers }: { layers: MapLayerInput[] }) {
   const map = useMap();
 
@@ -386,20 +460,27 @@ function FitToGeoJson({ geojson }: { geojson: any | null }) {
   return null;
 }
 
-function FitToMany({ layers }: { layers: MapLayerInput[] }) {
+/**
+ * ✅ IMPORTANT CHANGE:
+ * FitToMany previously "auto-zoomed" whenever layers change.
+ * That would fight with your new "click Selected -> zoom to layer".
+ *
+ * So now FitToMany runs ONLY on first meaningful render (initial mount)
+ * to give a nice initial extent once layers exist.
+ */
+function FitToManyOnce({ layers }: { layers: MapLayerInput[] }) {
   const map = useMap();
+  const didRef = useRef(false);
 
   useEffect(() => {
-    let alive = true;
-    let t: any = null;
-
+    if (didRef.current) return;
     if (!layers.length) return;
 
     try {
       let merged: L.LatLngBounds | null = null;
 
       for (const l of layers) {
-        if (l.id === MY_LOC_LAYER_ID) continue; // ✅ exclude My Location
+        if (l.id === MY_LOC_LAYER_ID) continue;
         const safe = safeGeojsonForBounds(l.geojson);
         if (!safe) continue;
 
@@ -411,20 +492,13 @@ function FitToMany({ layers }: { layers: MapLayerInput[] }) {
       }
 
       if (merged && merged.isValid()) {
+        didRef.current = true;
         map.fitBounds(merged, { padding: [24, 24] });
-        t = setTimeout(() => {
-          if (!alive) return;
-          safeInvalidate(map);
-        }, 120);
+        setTimeout(() => safeInvalidate(map), 120);
       }
     } catch (err) {
       console.warn("Failed to fit bounds:", err);
     }
-
-    return () => {
-      alive = false;
-      if (t) clearTimeout(t);
-    };
   }, [layers, map]);
 
   return null;
@@ -496,17 +570,18 @@ export default function ResultMap(props: Props) {
           setTimeout(() => ctx?.target?.invalidateSize?.(), 200);
         }}
       >
-        {/* ✅ NEW: real fix for panel/dock resize */}
+        {/* ✅ resize fixes */}
         <InvalidateOnContainerResize containerRef={containerRef} />
-
         <InvalidateOnEvents />
         <InvalidateOnBasemapToggle showBasemap={showBasemap} />
 
-        {/* ✅ forward map move/click */}
-        {/* <ForwardMapEvents onMapMouseMove={
-        props.onMapMouseMove} onMapClick={props.onMapClick} /> */}
+        {/* ✅ forward map events to page.tsx (measure tool) */}
+        <ForwardMapEvents onMapMouseMove={props.onMapMouseMove} onMapClick={props.onMapClick} />
 
-        {/* ✅ fly to "My Location" */}
+        {/* ✅ NEW: zoom requests from page.tsx (Selected click / location) */}
+        <ZoomController zoomTo={props.zoomTo ?? null} layers={orderedLayers} />
+
+        {/* optional: auto-fly whenever location changes */}
         <FlyToMyLocation layers={orderedLayers} />
 
         {showBasemap ? (
@@ -534,7 +609,11 @@ export default function ResultMap(props: Props) {
           </AnyLayersControl>
         ) : null}
 
-        {props.layers?.length ? <FitToMany layers={orderedLayers} /> : <FitToGeoJson geojson={props.geojson ?? null} />}
+        {/* ✅ IMPORTANT: don't fight zoom requests
+            - if you are rendering a single GeoJSON, fit it
+            - if you are rendering multiple layers, only fit ONCE at start
+        */}
+        {props.layers?.length ? <FitToManyOnce layers={orderedLayers} /> : <FitToGeoJson geojson={props.geojson ?? null} />}
 
         {orderedLayers.map((layer) => {
           const feats = layer.geojson?.features;
@@ -562,19 +641,19 @@ export default function ResultMap(props: Props) {
                 pointToLayer={(feature: any, latlng: any) => {
                   const c = getFeatureColor(feature, baseColor);
                   const markerType = feature?.properties?.__marker;
-                
-                  // ✅ accuracy ring support (optional)
+
+                  // accuracy ring (optional)
                   if (markerType === "accuracy") {
                     const acc = Number(feature?.properties?.accuracy_m ?? feature?.properties?.accuracy ?? 0);
                     const radius = Number.isFinite(acc) && acc > 0 ? acc : 30;
                     return L.circle(latlng, { ...accuracyCircleStyle(c), radius });
                   }
-                
-                  // ✅ ALWAYS render My Location layer points as DOT (even if markerType missing)
+
+                  // always render My Location layer points as DOT
                   if (layer.id === MY_LOC_LAYER_ID || markerType === "dot") {
                     return L.circleMarker(latlng, pointDotStyle(c));
                   }
-                
+
                   return L.circleMarker(latlng, pointStyle(c));
                 }}
                 onEachFeature={(feature: any, leafletLayer: any) => {
@@ -584,7 +663,6 @@ export default function ResultMap(props: Props) {
                   const isDot = markerType === "dot";
                   const isAccuracy = markerType === "accuracy";
 
-                  // keep ring behind dot
                   if (isAccuracy) {
                     try {
                       leafletLayer.bringToBack?.();
