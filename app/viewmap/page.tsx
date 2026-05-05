@@ -2517,12 +2517,12 @@ const groupedFiltered = useMemo(() => {
 }
 
 .profileFooter a {
-  color: #1877f2; /* Facebook blue */
-  text-decoration: none;
+  color: inherit;        /* same color as "Developed by" */
+  text-decoration: none; /* remove underline */
 }
 
 .profileFooter a:hover {
-  text-decoration: underline;
+  text-decoration: underline; /* subtle hover effect */
 }
 
       `}</style>
