@@ -748,7 +748,7 @@ useEffect(() => {
           </button>
 
           <div className="help">
-            <span>Need access? Contact your administrator.</span>
+            {/* <span>Need access? Contact your administrator.</span> */}
             <span>© DENR</span>
             <span className="devCredit">
               Developed by{" "}
