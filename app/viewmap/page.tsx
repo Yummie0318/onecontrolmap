@@ -30,8 +30,6 @@ import {
   faMinus,
   faBars,
   faSliders,
-  faSun,
-  faMoon,
 } from "@fortawesome/free-solid-svg-icons";
 
 type LayerRow = {
@@ -2819,26 +2817,34 @@ const groupedFiltered = useMemo(() => {
             <div className="profileMenu" role="menu">
           <div className="profileHead" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
             <div className="profileName">Guest User</div>
-            <button
-              className="btn btnGhost"
-              type="button"
-              onClick={() => setDarkMode((v) => !v)}
-              title={darkMode ? "Light mode" : "Dark mode"}
-              style={{
-                borderRadius: 999,
-                padding: "6px 10px",
-                fontSize: 13,
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                flexShrink: 0,
-              }}
-            >
-              <FontAwesomeIcon icon={darkMode ? faSun : faMoon} />
-              <span style={{ fontSize: 11, fontWeight: 560, color: "var(--muted)" }}>
-                {darkMode ? "Light" : "Dark"}
-              </span>
-            </button>
+             <button
+                className="btn btnGhost"
+                type="button"
+                onClick={() => setDarkMode((v) => !v)}
+                title={darkMode ? "Light mode" : "Dark mode"}
+                style={{
+                  borderRadius: 999,
+                  padding: "6px 10px",
+                  fontSize: 13,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  flexShrink: 0,
+                }}
+              >
+                {darkMode ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+                  </svg>
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                  </svg>
+                )}
+                <span style={{ fontSize: 11, fontWeight: 560, color: "var(--muted)" }}>
+                  {darkMode ? "Light" : "Dark"}
+                </span>
+              </button>
           </div>
             
               <div className="profileDivider" />
