@@ -2817,7 +2817,8 @@ const groupedFiltered = useMemo(() => {
             <div className="profileMenu" role="menu">
           <div className="profileHead" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
             <div className="profileName">Guest User</div>
-             <button
+             
+            <button
                 className="btn btnGhost"
                 type="button"
                 onClick={() => setDarkMode((v) => !v)}
@@ -2845,6 +2846,7 @@ const groupedFiltered = useMemo(() => {
                   {darkMode ? "Light" : "Dark"}
                 </span>
               </button>
+            
           </div>
             
               <div className="profileDivider" />
