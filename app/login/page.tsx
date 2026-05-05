@@ -115,6 +115,19 @@ export default function LoginPage() {
 
   const [toast, setToast] = useState<{ kind: ToastKind; title: string; message?: string } | null>(null);
 
+  const [darkMode, setDarkMode] = useState(false);
+
+useEffect(() => {
+  const saved = localStorage.getItem("theme") === "dark";
+  setDarkMode(saved);
+  document.documentElement.setAttribute("data-theme", saved ? "dark" : "light");
+}, []);
+
+useEffect(() => {
+  document.documentElement.setAttribute("data-theme", darkMode ? "dark" : "light");
+  localStorage.setItem("theme", darkMode ? "dark" : "light");
+}, [darkMode]);
+
   useEffect(() => {
     // ✅ If already logged in, check expiry (5 minutes)
     try {
@@ -217,6 +230,131 @@ export default function LoginPage() {
           --blue:#1166cc;
           --blueBg: rgba(17,102,204,.10);
         }
+
+        [data-theme="dark"] {
+  --bg0: #0d1117;
+  --bg1: #161b22;
+  --text: #e6edf3;
+  --muted: rgba(230,237,243,.55);
+  --stroke: rgba(230,237,243,.10);
+  --stroke2: rgba(230,237,243,.18);
+  --shadow: 0 14px 40px rgba(0,0,0,.40);
+  --shadow2: 0 30px 90px rgba(0,0,0,.50);
+  --primaryBg: rgba(15,122,58,.18);
+  --blueBg: rgba(17,102,204,.18);
+}
+
+[data-theme="dark"] body {
+  background:
+    radial-gradient(900px 560px at 12% 0%, rgba(15,122,58,.10), transparent 60%),
+    radial-gradient(900px 560px at 88% 18%, rgba(17,102,204,.10), transparent 60%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
+}
+
+[data-theme="dark"] .card {
+  background: rgba(22,27,34,.92);
+  border-color: rgba(230,237,243,.10);
+}
+
+[data-theme="dark"] .brandTitle {
+  color: rgba(230,237,243,.92);
+}
+
+[data-theme="dark"] .brandSub {
+  color: rgba(230,237,243,.52);
+}
+
+[data-theme="dark"] .brandLogo {
+  background: rgba(22,27,34,.92);
+  border-color: rgba(230,237,243,.10);
+}
+
+[data-theme="dark"] .formTitle {
+  color: rgba(230,237,243,.92);
+}
+
+[data-theme="dark"] .formSub {
+  color: rgba(230,237,243,.52);
+}
+
+[data-theme="dark"] label {
+  color: rgba(230,237,243,.72);
+}
+
+[data-theme="dark"] .inputWrap {
+  background: rgba(13,17,23,.60);
+  border-color: rgba(230,237,243,.10);
+}
+
+[data-theme="dark"] .inputWrap:focus-within {
+  border-color: rgba(15,122,58,.40);
+  box-shadow: 0 0 0 5px rgba(15,122,58,.12);
+}
+
+[data-theme="dark"] input {
+  color: rgba(230,237,243,.92);
+}
+
+[data-theme="dark"] input::placeholder {
+  color: rgba(230,237,243,.28);
+}
+
+[data-theme="dark"] .iconMiniBtn {
+  background: rgba(22,27,34,.92);
+  border-color: rgba(230,237,243,.10);
+  color: rgba(230,237,243,.70);
+}
+
+[data-theme="dark"] .iconMiniBtn:hover {
+  border-color: rgba(230,237,243,.20);
+  box-shadow: 0 12px 28px rgba(0,0,0,.30);
+}
+
+[data-theme="dark"] .btn {
+  background: rgba(22,27,34,.92);
+  border-color: rgba(230,237,243,.10);
+  color: rgba(230,237,243,.88);
+}
+
+[data-theme="dark"] .btnPrimary {
+  border-color: rgba(15,122,58,.30);
+  background: linear-gradient(180deg, rgba(15,122,58,.16), rgba(22,27,34,.92));
+}
+
+[data-theme="dark"] .check {
+  color: rgba(230,237,243,.62);
+}
+
+[data-theme="dark"] .help {
+  color: rgba(230,237,243,.40);
+  border-top-color: rgba(230,237,243,.08);
+}
+
+[data-theme="dark"] .devCredit {
+  color: rgba(230,237,243,.30);
+}
+
+[data-theme="dark"] .toast {
+  background: rgba(22,27,34,.96);
+  border-color: rgba(230,237,243,.10);
+  color: rgba(230,237,243,.88);
+}
+
+[data-theme="dark"] .toastTitle {
+  color: rgba(230,237,243,.92);
+}
+
+[data-theme="dark"] .toastMsg {
+  color: rgba(230,237,243,.52);
+}
+
+[data-theme="dark"] .toastX {
+  color: rgba(230,237,243,.60);
+}
+
+[data-theme="dark"] .toastX:hover {
+  background: rgba(230,237,243,.08);
+}
 
         html, body { height:100%; margin:0; }
         body{
@@ -476,29 +614,45 @@ export default function LoginPage() {
         }
 
         .help {
-              display: flex;
-              flex-direction: column;
-              gap: 4px;
-              font-size: 12px;
-              color: #777;
-              text-align: center;
-              margin-top: 15px;
-            }
-            
-            .devCredit {
-              font-size: 11px;
-              color: #aaa;
-            }
-            
-            .devCredit a {
-              color: inherit;
-              text-decoration: none;
-            }
-            
-            .devCredit a:hover {
-              text-decoration: underline;
-            }
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #777;
+  text-align: center;
+  margin-top: 15px;
+}
 
+.devCredit {
+  font-size: 11px;
+  color: #aaa;
+}
+
+.devCredit a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.devCredit a:hover {
+  text-decoration: underline;
+}
+  .profileFooter {
+  margin-top: 10px;
+  padding-top: 8px;
+  font-size: 12px;
+  color: #888;
+  text-align: center;
+  border-top: 1px solid #eee;
+}
+
+.profileFooter a {
+  color: inherit;        /* same color as "Developed by" */
+  text-decoration: none; /* remove underline */
+}
+
+.profileFooter a:hover {
+  text-decoration: underline; /* subtle hover effect */
+}
       `}</style>
 
       {toast ? <Toast kind={toast.kind} title={toast.title} message={toast.message} onClose={() => setToast(null)} /> : null}
@@ -514,6 +668,25 @@ export default function LoginPage() {
               <div className="brandSub">PENRO Cagayan</div>
             </div>
           </div>
+
+          {/* Dark mode toggle */}
+          <button
+            className="iconMiniBtn"
+            type="button"
+            onClick={() => setDarkMode((v) => !v)}
+            title={darkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
+            aria-label={darkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
+          >
+            {darkMode ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+              </svg>
+            )}
+          </button>
         </div>
 
         <div className="header">
@@ -574,22 +747,22 @@ export default function LoginPage() {
             View Map
           </button>
 
-       <div className="help">
-        {/* <span>Need access? Contact your administrator.</span> */}
-        <span>© DENR</span>
-        <span className="devCredit">
-          Developed by{" "}
-          <a
-            href="https://www.facebook.com/arnold.mendoza.5283166/directory_privacy_and_legal_info"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Arnold G. Mendoza
-          </a>
-        </span>
-      </div>
+          <div className="help">
+            <span>Need access? Contact your administrator.</span>
+            <span>© DENR</span>
+            <span className="devCredit">
+              Developed by{" "}
+              <a
+                href="https://www.facebook.com/arnold.mendoza.5283166/directory_privacy_and_legal_info"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Arnold G. Mendoza
+              </a>
+            </span>
+          </div>
 
-          
+
         </form>
       </div>
     </div>
