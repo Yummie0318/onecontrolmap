@@ -474,6 +474,31 @@ export default function LoginPage() {
         @media (max-width: 420px){
           .card{ padding: 18px; border-radius: 22px; }
         }
+
+        .help {
+              display: flex;
+              flex-direction: column;
+              gap: 4px;
+              font-size: 12px;
+              color: #777;
+              text-align: center;
+              margin-top: 15px;
+            }
+            
+            .devCredit {
+              font-size: 11px;
+              color: #aaa;
+            }
+            
+            .devCredit a {
+              color: inherit;
+              text-decoration: none;
+            }
+            
+            .devCredit a:hover {
+              text-decoration: underline;
+            }
+
       `}</style>
 
       {toast ? <Toast kind={toast.kind} title={toast.title} message={toast.message} onClose={() => setToast(null)} /> : null}
@@ -549,10 +574,22 @@ export default function LoginPage() {
             View Map
           </button>
 
-          <div className="help">
-            <span>Need access? Contact your administrator.</span>
-            <span>© DENR</span>
-          </div>
+       <div className="help">
+        {/* <span>Need access? Contact your administrator.</span> */}
+        <span>© DENR</span>
+        <span className="devCredit">
+          Developed by{" "}
+          <a
+            href="https://www.facebook.com/arnold.mendoza.5283166/directory_privacy_and_legal_info"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Arnold G. Mendoza
+          </a>
+        </span>
+      </div>
+
+          
         </form>
       </div>
     </div>
