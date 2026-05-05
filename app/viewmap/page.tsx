@@ -30,6 +30,8 @@ import {
   faMinus,
   faBars,
   faSliders,
+  faSun,
+  faMoon,
 } from "@fortawesome/free-solid-svg-icons";
 
 type LayerRow = {
@@ -199,8 +201,8 @@ function SpinnerDot({ size = 16 }: { size?: number }) {
         width: size,
         height: size,
         borderRadius: 999,
-        border: "2px solid rgba(11,18,32,.16)",
-        borderTopColor: "rgba(11,18,32,.75)",
+        border: "2px solid var(--stroke2)",
+        borderTopColor: "var(--text)",
         display: "inline-block",
         animation: "spin .85s linear infinite",
       }}
@@ -272,7 +274,7 @@ export default function ViewMapPage() {
   const [mobileTab, setMobileTab] = useState<"all" | "selected">("all");
   const [desktopTab, setDesktopTab] = useState<"all" | "selected">("all");
 
-  const [showBasemap, setShowBasemap] = useState(false);
+  const [showBasemap, setShowBasemap] = useState(true);
   const abortersRef = useRef<Record<string, AbortController>>({});
 
   const [toast, setToast] = useState<ToastState>({ show: false });
@@ -1285,6 +1287,19 @@ const groupedFiltered = useMemo(() => {
     pickAllRef.current.indeterminate = !allFilteredSelected && someFilteredSelected;
   }, [allFilteredSelected, someFilteredSelected]);
 
+  const [darkMode, setDarkMode] = useState(false);
+
+  useEffect(() => {
+    const saved = localStorage.getItem("theme") === "dark";
+    setDarkMode(saved);
+    document.documentElement.setAttribute("data-theme", saved ? "dark" : "light");
+  }, []);
+  
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", darkMode ? "dark" : "light");
+    localStorage.setItem("theme", darkMode ? "dark" : "light");
+  }, [darkMode]);
+
   const [profileOpen, setProfileOpen] = useState(false);
   const profileWrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -1411,6 +1426,231 @@ const groupedFiltered = useMemo(() => {
           --danger:#d92d20;
           --dangerBg: rgba(217,45,32,.10);
         }
+
+        [data-theme="dark"] {
+  --bg0: #0d1117;
+  --bg1: #161b22;
+  --panel: #161b22;
+  --text: #e6edf3;
+  --muted: rgba(230,237,243,.55);
+  --stroke: rgba(230,237,243,.10);
+  --stroke2: rgba(230,237,243,.18);
+  --shadow: 0 14px 40px rgba(0,0,0,.40);
+  --shadow2: 0 30px 90px rgba(0,0,0,.50);
+  --primaryBg: rgba(15,122,58,.18);
+  --blueBg: rgba(17,102,204,.18);
+  --dangerBg: rgba(217,45,32,.18);
+}
+
+[data-theme="dark"] body {
+  background:
+    radial-gradient(900px 560px at 14% 0%, rgba(15,122,58,.10), transparent 60%),
+    radial-gradient(900px 560px at 88% 12%, rgba(17,102,204,.10), transparent 60%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
+}
+
+[data-theme="dark"] .topBar,
+[data-theme="dark"] .mapHead,
+[data-theme="dark"] .dockTop,
+[data-theme="dark"] .tableBar {
+  background: rgba(22,27,34,.88);
+}
+
+[data-theme="dark"] .panel,
+[data-theme="dark"] .mapStack,
+[data-theme="dark"] .dock {
+  background: rgba(22,27,34,.92);
+}
+
+[data-theme="dark"] .miniItem,
+[data-theme="dark"] .btn,
+[data-theme="dark"] .pill,
+[data-theme="dark"] .chip,
+[data-theme="dark"] .searchWrap,
+[data-theme="dark"] .seg,
+[data-theme="dark"] .groupBlock,
+[data-theme="dark"] .groupHeader {
+  background: rgba(22,27,34,.92);
+  border-color: rgba(230,237,243,.10);
+  color: var(--text);
+}
+
+[data-theme="dark"] .seg.active {
+  background: rgba(30,37,48,.96);
+  border-color: rgba(230,237,243,.14);
+  color: var(--text);
+}
+
+[data-theme="dark"] th {
+  background: rgba(22,27,34,.98);
+  color: rgba(230,237,243,.88);
+  border-bottom-color: rgba(230,237,243,.12);
+}
+
+[data-theme="dark"] td {
+  color: rgba(230,237,243,.80);
+  border-bottom-color: rgba(230,237,243,.08);
+}
+
+[data-theme="dark"] tbody tr:hover td {
+  background: rgba(15,122,58,.08);
+}
+
+[data-theme="dark"] tbody tr.rowSelected td {
+  background: rgba(15,122,58,.14) !important;
+}
+
+[data-theme="dark"] .toast,
+[data-theme="dark"] .profileMenu,
+[data-theme="dark"] .overlayCard {
+  background: rgba(22,27,34,.96);
+  border-color: rgba(230,237,243,.10);
+  color: var(--text);
+}
+
+[data-theme="dark"] .profileName,
+[data-theme="dark"] .profileItem {
+  color: var(--text);
+}
+
+[data-theme="dark"] .profileItem:hover {
+  background: rgba(15,122,58,.10);
+}
+
+[data-theme="dark"] .profileDivider {
+  background: rgba(230,237,243,.08);
+}
+
+[data-theme="dark"] .searchInput {
+  color: var(--text);
+}
+
+[data-theme="dark"] .tableWrap {
+  background: rgba(13,17,23,.04);
+}
+
+[data-theme="dark"] .featureCard {
+  background: #161b22;
+  border-color: rgba(230,237,243,.10);
+}
+
+[data-theme="dark"] .sheet {
+  background: rgba(22,27,34,.98);
+}
+
+[data-theme="dark"] .tab {
+  background: rgba(22,27,34,.92);
+  border-color: rgba(230,237,243,.10);
+  color: var(--text);
+}
+
+[data-theme="dark"] .tab.active {
+  border-color: rgba(15,122,58,.28);
+  background: rgba(15,122,58,.14);
+}
+
+[data-theme="dark"] .avatar {
+  background: rgba(15,122,58,.18);
+}
+
+[data-theme="dark"] select.btn {
+  background: rgba(22,27,34,.92);
+  color: var(--text);
+}
+[data-theme="dark"] .overlaySaving {
+  background: rgba(0,0,0,.65);
+}
+
+[data-theme="dark"] .overlayCard {
+  background: rgba(22,27,34,.98);
+  border-color: rgba(230,237,243,.12);
+}
+
+[data-theme="dark"] .overlayTitle {
+  color: rgba(230,237,243,.92);
+}
+
+[data-theme="dark"] .overlaySub {
+  color: rgba(230,237,243,.58);
+}
+
+[data-theme="dark"] .overlayHint {
+  background: rgba(255,255,255,.04);
+  border-color: rgba(230,237,243,.12);
+  color: rgba(230,237,243,.55);
+}
+
+[data-theme="dark"] .overlayIcon {
+  background: rgba(255,255,255,.04);
+  border-color: rgba(230,237,243,.10);
+}
+
+[data-theme="dark"] .shimmer {
+  background: linear-gradient(90deg, rgba(230,237,243,.06), rgba(230,237,243,.12), rgba(230,237,243,.06));
+  background-size: 200% 100%;
+}
+
+[data-theme="dark"] .ring {
+  border-color: rgba(230,237,243,.14);
+  border-top-color: var(--blue);
+}
+
+[data-theme="dark"] .listWrap > div {
+  color: var(--text);
+}
+[data-theme="dark"] .groupToggle {
+  color: rgba(230,237,243,.55);
+}
+
+[data-theme="dark"] .groupTitle {
+  color: rgba(230,237,243,.88);
+}
+
+[data-theme="dark"] .groupBadge {
+  background: rgba(15,122,58,.18);
+  border-color: rgba(15,122,58,.30);
+  color: rgba(15,122,58,.95);
+}
+
+[data-theme="dark"] .groupBlock {
+  background: rgba(22,27,34,.75);
+  border-color: rgba(230,237,243,.08);
+}
+
+[data-theme="dark"] .groupHeader {
+  background: rgba(22,27,34,.92);
+}
+
+[data-theme="dark"] .groupHeader:hover {
+  background: rgba(15,122,58,.10);
+}
+
+[data-theme="dark"] .miniName {
+  color: rgba(230,237,243,.88);
+}
+
+[data-theme="dark"] .miniMeta {
+  color: rgba(230,237,243,.45);
+}
+
+[data-theme="dark"] .miniNameBtn {
+  color: var(--text);
+}
+
+[data-theme="dark"] .badgeOn {
+  background: rgba(15,122,58,.18);
+  border-color: rgba(15,122,58,.30);
+  color: rgba(15,122,58,.95);
+}
+
+[data-theme="dark"] .err {
+  background: rgba(217,45,32,.12);
+  border-color: rgba(217,45,32,.22);
+  color: rgba(255,180,170,.90);
+}
+
+
+
 
         html, body { height:100%; margin:0; }
         html, body{
@@ -2548,6 +2788,17 @@ const groupedFiltered = useMemo(() => {
 
         
         <div className="topRight">
+            {/* Dark Mode Toggle */}
+            {/* <button
+              className="btn btnGhost iconBtn"
+              type="button"
+              onClick={() => setDarkMode((v) => !v)}
+              title={darkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
+              style={{ borderRadius: 999 }}
+            >
+              <FontAwesomeIcon icon={darkMode ? faSun : faMoon} />
+            </button> */}
+  
           <div className="profileWrap" ref={profileWrapRef}>
             <button
               className="btn btnGhost iconBtn"
@@ -2566,9 +2817,29 @@ const groupedFiltered = useMemo(() => {
             {profileOpen ? (
       
             <div className="profileMenu" role="menu">
-              <div className="profileHead">
-                <div className="profileName">Guest User</div>
-              </div>
+          <div className="profileHead" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <div className="profileName">Guest User</div>
+            <button
+              className="btn btnGhost"
+              type="button"
+              onClick={() => setDarkMode((v) => !v)}
+              title={darkMode ? "Light mode" : "Dark mode"}
+              style={{
+                borderRadius: 999,
+                padding: "6px 10px",
+                fontSize: 13,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                flexShrink: 0,
+              }}
+            >
+              <FontAwesomeIcon icon={darkMode ? faSun : faMoon} />
+              <span style={{ fontSize: 11, fontWeight: 560, color: "var(--muted)" }}>
+                {darkMode ? "Light" : "Dark"}
+              </span>
+            </button>
+          </div>
             
               <div className="profileDivider" />
             
@@ -2965,7 +3236,7 @@ const groupedFiltered = useMemo(() => {
                     {showBasemap ? "Basemap: ON" : "Basemap: OFF"}
                   </button>
 
-                  <button
+                  {/* <button
                     className={`btn iconBtn ${userLoc ? "iconActive" : "btnGhost"}`}
                     onClick={requestUserLocation}
                     disabled={locLoading}
@@ -2973,7 +3244,7 @@ const groupedFiltered = useMemo(() => {
                     type="button"
                   >
                     {locLoading ? <Ring size={16} /> : <FontAwesomeIcon icon={faLocationCrosshairs} />}
-                  </button>
+                  </button> */}
 
                   {measureActive ? (
                     <button
