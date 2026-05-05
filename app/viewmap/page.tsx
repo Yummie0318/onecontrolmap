@@ -2506,6 +2506,25 @@ const groupedFiltered = useMemo(() => {
   border-radius: 999px;
   border: 3px solid rgba(255,255,255,.65);
 }
+
+.profileFooter {
+  margin-top: 10px;
+  padding-top: 8px;
+  font-size: 12px;
+  color: #888;
+  text-align: center;
+  border-top: 1px solid #eee;
+}
+
+.profileFooter a {
+  color: #1877f2; /* Facebook blue */
+  text-decoration: none;
+}
+
+.profileFooter a:hover {
+  text-decoration: underline;
+}
+
       `}</style>
 
       {/* HEADER */}
@@ -2527,6 +2546,7 @@ const groupedFiltered = useMemo(() => {
           </div>
         </div>
 
+        
         <div className="topRight">
           <div className="profileWrap" ref={profileWrapRef}>
             <button
@@ -2544,24 +2564,41 @@ const groupedFiltered = useMemo(() => {
             </button>
 
             {profileOpen ? (
-              <div className="profileMenu" role="menu">
-                <div className="profileHead">
-                  <div className="profileName">Guest User</div>
-                </div>
-                <div className="profileDivider" />
-                <button
-                  className="profileItem"
-                  role="menuitem"
-                  type="button"
-                  onClick={() => {
-                    setProfileOpen(false);
-                    window.location.href = "/login";
-                  }}
-                >
-                  <FontAwesomeIcon icon={faUserShield} />
-                  <span>Admin Login</span>
-                </button>
+      
+            <div className="profileMenu" role="menu">
+              <div className="profileHead">
+                <div className="profileName">Guest User</div>
               </div>
+            
+              <div className="profileDivider" />
+            
+              <button
+                className="profileItem"
+                role="menuitem"
+                type="button"
+                onClick={() => {
+                  setProfileOpen(false);
+                  window.location.href = "/login";
+                }}
+              >
+                <FontAwesomeIcon icon={faUserShield} />
+                <span>Admin Login</span>
+              </button>
+            
+              {/* Footer */}
+              <div className="profileFooter">
+                Developed by{" "}
+                <a
+                  href="https://www.facebook.com/arnold.mendoza.5283166/directory_privacy_and_legal_info"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Arnold G. Mendoza
+                </a>
+              </div>
+            </div>
+
+      
             ) : null}
           </div>
         </div>
