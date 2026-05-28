@@ -345,27 +345,39 @@ function ZoomController({ zoomTo, layers }: { zoomTo: ZoomToRequest; layers: Map
     }
 
     // 🔥 Zoom to selected layer extent
+// 🔥 Zoom to selected layer extent
     if (zoomTo.type === "layer") {
-      const target = layers.find((l) => l.id === zoomTo.layerId) ?? null;
-      if (!target?.geojson) return;
-
-      const safe = safeGeojsonForBounds(target.geojson);
-      if (!safe) return;
-
-      try {
-        const gj = L.geoJSON(safe);
-        const b = gj.getBounds();
-        if (b?.isValid()) {
-          map.fitBounds(b.pad(0.12), { animate: true, duration: 0.6 });
+      const doZoom = (attempt: number) => {
+        const target = layers.find((l) => l.id === zoomTo.layerId) ?? null;
+        if (!target?.geojson) {
+          // ✅ Retry up to 3 times — local layer geojson may not be in orderedLayers yet
+          if (attempt < 3) {
+            const t = setTimeout(() => doZoom(attempt + 1), 80);
+            return () => clearTimeout(t);
+          }
+          return;
         }
-      } catch {}
 
-      const t1 = setTimeout(() => safeInvalidate(map), 0);
-      const t2 = setTimeout(() => safeInvalidate(map), 180);
-      return () => {
-        clearTimeout(t1);
-        clearTimeout(t2);
+        const safe = safeGeojsonForBounds(target.geojson);
+        if (!safe) return;
+
+        try {
+          const gj = L.geoJSON(safe);
+          const b = gj.getBounds();
+          if (b?.isValid()) {
+            map.fitBounds(b.pad(0.12), { animate: true, duration: 0.6 });
+          }
+        } catch {}
+
+        const t1 = setTimeout(() => safeInvalidate(map), 0);
+        const t2 = setTimeout(() => safeInvalidate(map), 180);
+        return () => {
+          clearTimeout(t1);
+          clearTimeout(t2);
+        };
       };
+
+      return doZoom(0) as any;
     }
   }, [
     // only react when request changes
@@ -537,27 +549,13 @@ export default function ResultMap(props: Props) {
     return orderedLayers.some((l) => Array.isArray(l.geojson?.features) && l.geojson.features.length > 0);
   }, [orderedLayers]);
 
-const mapKey = useMemo(() => {
-    const ids = orderedLayers.map((l) => l.id).join("|");
-    const counts = orderedLayers
-      .map((l) => (Array.isArray(l.geojson?.features) ? l.geojson.features.length : 0))
-      .join(",");
-    const orders = orderedLayers.map((l) => `${l.id}:${l.orderNo ?? 0}`).join("|");
-    // include per-feature __color so map re-renders when colors change
-    const colors = orderedLayers.map((l) => {
-      const feats = l.geojson?.features;
-      if (!Array.isArray(feats)) return "";
-      return feats.map((f: any) => f?.properties?.__color ?? "").join(",");
-    }).join("|");
-    return `map-${ids}-${counts}-${orders}-${colors}`;
-  }, [orderedLayers]);
+const mapKey = "stable-map";
 
   const Z_BASE = 450;
 
   return (
     <div ref={containerRef} style={{ position: "relative", width: "100%", height: "100%" }}>
       <AnyMapContainer
-        key={mapKey}
         center={[17.7, 121.7]}
         zoom={8}
         zoomControl
@@ -627,8 +625,7 @@ const mapKey = useMemo(() => {
 
           const isMyLocLayer = layer.id === MY_LOC_LAYER_ID;
           const baseColor = layer.color || DEFAULT_FALLBACK_COLOR;
-const colorSig = feats.map((f: any) => f?.properties?.__color ?? "").join(",");
-const geoKey = `geo-${layer.id}-${feats.length}-${colorSig}`;
+const geoKey = `geo-${layer.id}`;
 
           const paneName = isMyLocLayer ? MY_LOC_PANE : `pane-${layer.id}`;
           const z = isMyLocLayer ? 999999 : Z_BASE + (layer.orderNo ?? 0);
