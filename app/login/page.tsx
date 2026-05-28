@@ -493,10 +493,10 @@ export default function LoginPage() {
 
         {/* Radar rings on Cagayan/Philippines area */}
         {[
-          { top:"38%", left:"82%", size:55, delay:"0s" },
-          { top:"52%", left:"78%", size:45, delay:"1.6s" },
-          { top:"30%", left:"85%", size:40, delay:"3.0s" },
-          { top:"45%", left:"75%", size:50, delay:"2.3s" },
+{ top:"35%", left:"80%", size:55, delay:"0s" },
+{ top:"40%", left:"83%", size:45, delay:"1.6s" },
+{ top:"38%", left:"78%", size:40, delay:"3.0s" },
+{ top:"44%", left:"81%", size:50, delay:"2.3s" },
         ].map((r, i) => (
           <div key={i} className="radar" style={{
             top: r.top, left: r.left, width: r.size, height: r.size,
@@ -507,11 +507,11 @@ export default function LoginPage() {
 
         {/* Location pins — Philippines/Cagayan region on a world-zoom map */}
         {[
-          { top:"38%", left:"82%", delay:"0s" },
-          { top:"52%", left:"78%", delay:"0.8s" },
-          { top:"30%", left:"85%", delay:"1.5s" },
-          { top:"45%", left:"75%", delay:"2.1s" },
-          { top:"42%", left:"80%", delay:"0.4s" },
+  { top:"35%", left:"80%", delay:"0s" },
+  { top:"40%", left:"83%", delay:"0.8s" },
+  { top:"38%", left:"78%", delay:"1.5s" },
+  { top:"44%", left:"81%", delay:"2.1s" },
+  { top:"42%", left:"85%", delay:"0.4s" },
         ].map((p, i) => (
           <div key={i} className="pin" style={{ top: p.top, left: p.left, animationDelay: p.delay, zIndex: 6 }} />
         ))}
