@@ -197,7 +197,11 @@ useEffect(() => {
       setToast({ kind: "success", title: "Welcome", message: `Logged in as ${data.user.username}` });
 
       // ✅ Redirect to protected page
-      window.location.href = "/admin/layers";
+        if (data.user.usertype === "admin") {
+        window.location.href = "/admin/layers";
+      } else {
+        window.location.href = "/viewmap";
+      }
     } catch (err: any) {
       setToast({ kind: "error", title: "Network error", message: err?.message ?? "Please try again." });
       setBusy(false);
