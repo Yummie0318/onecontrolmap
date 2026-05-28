@@ -1288,6 +1288,16 @@ const groupedFiltered = useMemo(() => {
 
   const [darkMode, setDarkMode] = useState(false);
 
+  const [authUser, setAuthUser] = useState<{ username: string; usertype: string } | null>(null);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("auth_user");
+      if (raw) setAuthUser(JSON.parse(raw));
+    } catch {}
+  }, []);
+
+
   useEffect(() => {
     const saved = localStorage.getItem("theme") === "dark";
     setDarkMode(saved);
@@ -2809,62 +2819,63 @@ const groupedFiltered = useMemo(() => {
               title="Profile"
               style={{ borderRadius: 999 }}
             >
-              <span className="avatar" aria-hidden="true">
-                U
-              </span>
+   <span className="avatar" aria-hidden="true">
+  {authUser?.username?.[0]?.toUpperCase() ?? "U"}
+</span>
             </button>
 
             {profileOpen ? (
       
             <div className="profileMenu" role="menu">
           <div className="profileHead" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-            <div className="profileName">Guest User</div>
-             
-            <button
-                className="btn btnGhost"
-                type="button"
-                onClick={() => setDarkMode((v) => !v)}
-                title={darkMode ? "Light mode" : "Dark mode"}
-                style={{
-                  borderRadius: 999,
-                  padding: "6px 10px",
-                  fontSize: 13,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  flexShrink: 0,
-                }}
-              >
-                {darkMode ? (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
-                  </svg>
-                ) : (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                  </svg>
-                )}
-                <span style={{ fontSize: 11, fontWeight: 560, color: "var(--muted)" }}>
-                  {darkMode ? "Light" : "Dark"}
-                </span>
-              </button>
-            
-          </div>
-            
-              <div className="profileDivider" />
-            
-              <button
-                className="profileItem"
-                role="menuitem"
-                type="button"
-                onClick={() => {
-                  setProfileOpen(false);
-                  window.location.href = "/login";
-                }}
-              >
-                <FontAwesomeIcon icon={faUserShield} />
-                <span>Admin Login</span>
-              </button>
+  <div>
+    <div className="profileName">{authUser?.username ?? "User"}</div>
+    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2, fontWeight: 520 }}>
+      {authUser?.usertype === "admin" ? "Administrator" : "User"}
+    </div>
+  </div>
+  <button
+    className="btn btnGhost"
+    type="button"
+    onClick={() => setDarkMode((v) => !v)}
+    title={darkMode ? "Light mode" : "Dark mode"}
+    style={{ borderRadius: 999, padding: "6px 10px", fontSize: 13, display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}
+  >
+    {darkMode ? (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+      </svg>
+    ) : (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
+    )}
+    <span style={{ fontSize: 11, fontWeight: 560, color: "var(--muted)" }}>
+      {darkMode ? "Light" : "Dark"}
+    </span>
+  </button>
+</div>
+
+<div className="profileDivider" />
+
+<button
+  className="profileItem"
+  role="menuitem"
+  type="button"
+  onClick={() => {
+    setProfileOpen(false);
+    localStorage.removeItem("auth_user");
+    localStorage.removeItem("is_logged_in");
+    localStorage.removeItem("login_time");
+    localStorage.removeItem("remember_me");
+    window.location.href = "/login?reason=logout";
+  }}
+>
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+  </svg>
+  <span>Log Out</span>
+</button>
             
               {/* Footer */}
               <div className="profileFooter">
