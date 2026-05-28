@@ -265,7 +265,7 @@ useEffect(() => {
 }
 
 [data-theme="dark"] .brandLogo {
-  background: rgba(22,27,34,.92);
+  background: #ffffff;
   border-color: rgba(230,237,243,.10);
 }
 
@@ -401,7 +401,7 @@ useEffect(() => {
           min-width:0;
         }
         .brandLogo{
-          width: 38px; height: 38px;
+          width: 48px; height: 48px;  /* was 38px */
           border-radius: 14px;
           border: 1px solid rgba(11,18,32,.10);
           background: rgba(255,255,255,.92);
@@ -661,7 +661,7 @@ useEffect(() => {
         <div className="topRow">
           <div className="brand">
             <div className="brandLogo" title="DENR">
-              <Image src="/images/denr.png" alt="DENR Logo" width={24} height={24} style={{ objectFit: "contain" }} />
+              <Image src="/images/denr.png" alt="DENR Logo" width={34} height={34} style={{ objectFit: "contain" }} />
             </div>
             <div className="brandTxt">
               <div className="brandTitle">One Control Map</div>
