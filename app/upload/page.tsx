@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import AuthGuard from "@/app/components/AuthGuard";
 
 export default function UploadPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -54,6 +55,7 @@ export default function UploadPage() {
   }
 
   return (
+     <AuthGuard>  
     <div style={{ padding: 24, maxWidth: 640 }}>
       <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 12 }}>
         Upload GeoJSON Layer
@@ -103,5 +105,6 @@ export default function UploadPage() {
         {status && <div style={{ whiteSpace: "pre-wrap" }}>{status}</div>}
       </div>
     </div>
+        </AuthGuard>  
   );
 }
