@@ -198,7 +198,7 @@ useEffect(() => {
 
       // ✅ Redirect to protected page
         if (data.user.usertype === "admin") {
-        window.location.href = "/admin/layers";
+        window.location.href = "/viewmap";
       } else {
         window.location.href = "/viewmap";
       }
