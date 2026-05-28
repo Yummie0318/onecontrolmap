@@ -265,6 +265,15 @@ export default function ViewMapPage() {
 
   const [loadingList, setLoadingList] = useState(false);
   const [booting, setBooting] = useState(true);
+const [authUser, setAuthUser] = useState<{ username: string; usertype: string } | null>(null);
+
+useEffect(() => {
+  try {
+    const raw = localStorage.getItem("auth_user");
+    if (raw) setAuthUser(JSON.parse(raw));
+  } catch {}
+}, []);
+  
 
   const [search, setSearch] = useState("");
   const isFiltering = search.trim().length > 0;
@@ -910,7 +919,7 @@ const groupedFiltered = useMemo(() => {
 
   // output ordered groups (only those with items)
   return GROUP_ORDER.map((k) => ({ key: k, items: map.get(k) ?? [] })).filter((g) => g.items.length > 0);
-}, [filtered]);
+}, [filtered, authUser]);
 
   const measureTo = measureFixedTo ?? measureHover;
 
@@ -1288,14 +1297,7 @@ const groupedFiltered = useMemo(() => {
 
   const [darkMode, setDarkMode] = useState(false);
 
-  const [authUser, setAuthUser] = useState<{ username: string; usertype: string } | null>(null);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem("auth_user");
-      if (raw) setAuthUser(JSON.parse(raw));
-    } catch {}
-  }, []);
 
 
   useEffect(() => {
