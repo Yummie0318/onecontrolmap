@@ -5,6 +5,7 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from "react"
 import ResultMap from "@/app/components/ResultMapClient";
 import Image from "next/image";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import AuthGuard from "@/app/components/AuthGuard";
 import {
   faLayerGroup,
   faRotateRight,
@@ -1387,6 +1388,7 @@ const groupedFiltered = useMemo(() => {
   }, [isMobile, tableCollapsed, tableLayerId, mobilePanelOpen]);
 
   return (
+    <AuthGuard> 
     <div className="shell">
       {toast.show ? (
         <div className="toast" role="status" aria-live="polite">
@@ -3773,5 +3775,6 @@ const groupedFiltered = useMemo(() => {
         ) : null}
       </div>
     </div>
+  </AuthGuard> 
   );
 }
