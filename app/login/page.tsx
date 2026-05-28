@@ -81,7 +81,7 @@ export default function LoginPage() {
     localStorage.setItem("theme", darkMode ? "dark" : "light");
   }, [darkMode]);
 
-  // ── Leaflet world map background ──────────────────────────────────────────
+  // ── Leaflet map background centered on Cagayan, PH ───────────────────────
   useEffect(() => {
     // Load Leaflet CSS
     const existingLink = document.getElementById("leaflet-css");
@@ -93,8 +93,6 @@ export default function LoginPage() {
       document.head.appendChild(link);
     }
 
-    // Load Leaflet JS then init map
-    const existingScript = document.getElementById("leaflet-js");
     function initMap() {
       const L = (window as any).L;
       if (!L) return;
@@ -104,13 +102,13 @@ export default function LoginPage() {
 
       // destroy previous instance if any
       if ((container as any)._leaflet_id) {
-        try { L.map("loginMapBg").remove(); } catch {}
+        try { (container as any)._mapInstance?.remove(); } catch {}
         (container as any)._leaflet_id = undefined;
       }
 
       const map = L.map("loginMapBg", {
-        center: [20, 0],
-        zoom: 2,
+        center: [17.6132, 121.7270], // Cagayan, Northern Luzon
+        zoom: 8,
         zoomControl: false,
         scrollWheelZoom: false,
         doubleClickZoom: false,
@@ -126,20 +124,51 @@ export default function LoginPage() {
         { subdomains: "abcd", maxZoom: 19 }
       ).addTo(map);
 
-      // Slow auto-pan: drift the map slowly across the world
-      let lng = 0;
-      const drift = setInterval(() => {
-        lng += 0.04;
-        map.setView([15, lng], 2, { animate: false });
-      }, 50);
+      // Glowing green dot marker icon
+      const glowIcon = L.divIcon({
+        className: "",
+        html: `
+          <div style="position:relative;width:14px;height:14px;">
+            <div style="
+              position:absolute;inset:0;border-radius:50%;
+              background:rgba(15,122,58,0.9);
+              box-shadow:0 0 0 3px rgba(15,122,58,0.25),0 0 16px rgba(15,122,58,0.7);
+              animation:leafletPinPulse 3s ease-out infinite;
+            "></div>
+            <div style="
+              position:absolute;top:50%;left:50%;
+              transform:translate(-50%,-50%);
+              width:5px;height:5px;border-radius:50%;background:#fff;
+            "></div>
+          </div>
+        `,
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+      });
 
-      // store cleanup on container
+      // Real Cagayan province municipality coordinates
+      const locations: [number, number][] = [
+        [18.3515, 121.8070], // Tuguegarao City (capital)
+        [18.0667, 122.0833], // Aparri
+        [17.9472, 121.8152], // Solana
+        [17.6132, 121.7270], // Amulung
+        [17.4333, 121.6333], // Enrile
+        [18.2333, 121.6333], // Abulug
+        [17.8000, 121.9000], // Gattaran
+        [18.1500, 121.9500], // Lasam
+      ];
+
+      locations.forEach(([lat, lng]) => {
+        L.marker([lat, lng], { icon: glowIcon }).addTo(map);
+      });
+
+      (container as any)._mapInstance = map;
       (container as any)._mapCleanup = () => {
-        clearInterval(drift);
         map.remove();
       };
     }
 
+    const existingScript = document.getElementById("leaflet-js");
     if (!existingScript) {
       const script = document.createElement("script");
       script.id = "leaflet-js";
@@ -238,11 +267,14 @@ export default function LoginPage() {
         ::selection{ background:rgba(15,122,58,.25); }
 
         /* ── MAP BG ── */
-        .mapBg{
-          position:fixed; inset:0; z-index:0; overflow:hidden;
-        }
-        /* leaflet attribution hide */
+        .mapBg{ position:fixed; inset:0; z-index:0; overflow:hidden; }
         .leaflet-control-attribution{ display:none !important; }
+
+        /* Leaflet marker pulse animation */
+        @keyframes leafletPinPulse{
+          0%,100%{ box-shadow:0 0 0 3px rgba(15,122,58,.25),0 0 16px rgba(15,122,58,.7); }
+          50%{ box-shadow:0 0 0 10px rgba(15,122,58,0),0 0 22px rgba(15,122,58,.4); }
+        }
 
         /* dark vignette overlay over the map */
         .mapOverlay{
@@ -281,34 +313,6 @@ export default function LoginPage() {
         @keyframes blobFloat{
           0%{transform:translate(0,0) scale(1)}
           100%{transform:translate(28px,-28px) scale(1.07)}
-        }
-
-        /* ── RADAR ── */
-        .radar{
-          position:absolute; border-radius:50%; pointer-events:none; z-index:4;
-          border:1px solid rgba(15,122,58,.45);
-          animation:radarPulse 4s ease-out infinite;
-        }
-        @keyframes radarPulse{
-          0%{transform:scale(0);opacity:.9}
-          100%{transform:scale(4.5);opacity:0}
-        }
-
-        /* ── PINS ── */
-        .pin{
-          position:absolute; width:10px; height:10px; border-radius:50%; z-index:5;
-          background:rgba(15,122,58,.95); pointer-events:none;
-          box-shadow:0 0 0 0 rgba(15,122,58,.6);
-          animation:pinPulse 3s ease-out infinite;
-        }
-        .pin::after{
-          content:""; position:absolute; top:50%; left:50%;
-          transform:translate(-50%,-50%); width:4px; height:4px;
-          border-radius:50%; background:#fff;
-        }
-        @keyframes pinPulse{
-          0%,100%{box-shadow:0 0 0 0 rgba(15,122,58,.6)}
-          50%{box-shadow:0 0 0 12px rgba(15,122,58,0)}
         }
 
         /* ── PARTICLES ── */
@@ -470,14 +474,16 @@ export default function LoginPage() {
         .toastX:hover{ background:rgba(232,240,254,.08); }
 
         @media (max-width:420px){ .card{ padding:18px; border-radius:20px; } }
+        @keyframes spin{ to{ transform:rotate(360deg); } }
       `}</style>
 
-      {/* ── WORLD MAP BACKGROUND ─────────────────────────────────── */}
+      {/* ── MAP BACKGROUND ───────────────────────────────────────── */}
       <div className="mapBg">
-        {/* Leaflet map container */}
+
+        {/* Leaflet map — renders real Cagayan PH tiles with geo-anchored markers */}
         <div id="loginMapBg" style={{ position:"absolute", inset:0, width:"100%", height:"100%", zIndex:1 }} />
 
-        {/* Dark vignette overlay */}
+        {/* Dark vignette */}
         <div className="mapOverlay" />
 
         {/* Animated grid */}
@@ -490,31 +496,6 @@ export default function LoginPage() {
         <div className="glowBlob" style={{ width:550, height:550, top:"-12%", left:"-6%", background:"rgba(15,122,58,.13)", animationDuration:"13s" }} />
         <div className="glowBlob" style={{ width:450, height:450, bottom:"-8%", right:"-4%", background:"rgba(59,130,246,.10)", animationDuration:"16s", animationDelay:"-5s" }} />
         <div className="glowBlob" style={{ width:280, height:280, top:"38%", left:"52%", background:"rgba(59,130,246,.07)", animationDuration:"11s", animationDelay:"-8s" }} />
-
-        {/* Radar rings on Cagayan/Philippines area */}
-        {[
-{ top:"35%", left:"80%", size:55, delay:"0s" },
-{ top:"40%", left:"83%", size:45, delay:"1.6s" },
-{ top:"38%", left:"78%", size:40, delay:"3.0s" },
-{ top:"44%", left:"81%", size:50, delay:"2.3s" },
-        ].map((r, i) => (
-          <div key={i} className="radar" style={{
-            top: r.top, left: r.left, width: r.size, height: r.size,
-            marginLeft: -r.size / 2, marginTop: -r.size / 2,
-            animationDelay: r.delay, animationDuration: "4.5s", zIndex: 5,
-          }} />
-        ))}
-
-        {/* Location pins — Philippines/Cagayan region on a world-zoom map */}
-        {[
-  { top:"35%", left:"80%", delay:"0s" },
-  { top:"40%", left:"83%", delay:"0.8s" },
-  { top:"38%", left:"78%", delay:"1.5s" },
-  { top:"44%", left:"81%", delay:"2.1s" },
-  { top:"42%", left:"85%", delay:"0.4s" },
-        ].map((p, i) => (
-          <div key={i} className="pin" style={{ top: p.top, left: p.left, animationDelay: p.delay, zIndex: 6 }} />
-        ))}
 
         {/* Floating particles */}
         {Array.from({ length: 16 }).map((_, i) => (
@@ -540,20 +521,12 @@ export default function LoginPage() {
               @keyframes dashMove2{ to{stroke-dashoffset:90} }
             `}</style>
           </defs>
-          {/* horizontal latitude lines */}
           {[12, 25, 38, 52, 65, 78].map((y, i) => (
             <line key={`h${i}`} className="mapLine" x1="0" y1={`${y}%`} x2="100%" y2={`${y}%`} style={{ animationDelay:`${i * -2.3}s` }} />
           ))}
-          {/* vertical longitude lines */}
           {[8, 20, 33, 47, 60, 73, 86].map((x, i) => (
             <line key={`v${i}`} className="mapLine2" x1={`${x}%`} y1="0" x2={`${x}%`} y2="100%" style={{ animationDelay:`${i * -1.8}s` }} />
           ))}
-          {/* curved route lines to Philippines area */}
-          <path className="mapLine" d="M 20% 35% Q 50% 20% 82% 38%" style={{ animationDelay:"-3s" }} />
-          <path className="mapLine2" d="M 5% 55% Q 40% 42% 78% 52%" style={{ animationDelay:"-7s" }} />
-          <path className="mapLine" d="M 82% 38% Q 84% 45% 78% 52%" style={{ animationDelay:"-1s" }} />
-          <path className="mapLine2" d="M 55% 60% Q 68% 50% 80% 45%" style={{ animationDelay:"-5s" }} />
-          <path className="mapLine" d="M 30% 70% Q 55% 55% 75% 52%" style={{ animationDelay:"-9s" }} />
         </svg>
       </div>
 
@@ -644,7 +617,6 @@ export default function LoginPage() {
             </button>
 
             <div className="help">
-         
               <span>© DENR · PENRO Cagayan</span>
               <span className="devCredit">
                 Developed by{" "}
@@ -656,8 +628,6 @@ export default function LoginPage() {
           </form>
         </div>
       </div>
-
-      <style>{`@keyframes spin{ to{ transform:rotate(360deg); } }`}</style>
     </div>
   );
 }
