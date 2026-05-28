@@ -204,10 +204,9 @@ useEffect(() => {
     }
   }
 
-  function goGuest() {
-    window.location.href = "/viewmap";
-  }
-
+function goSignup() {
+  window.location.href = "/signup";
+}
   return (
     <div className="page">
       <style>{`
@@ -268,7 +267,7 @@ useEffect(() => {
   background: #ffffff;
   border-color: rgba(230,237,243,.10);
 }
-
+  
 [data-theme="dark"] .formTitle {
   color: rgba(230,237,243,.92);
 }
@@ -743,12 +742,12 @@ useEffect(() => {
             {busy ? "Signing in…" : <strong>Sign in</strong>}
           </button>
 
-          <button className="btn btnPrimary btnWide" type="button" onClick={goGuest} disabled={busy}>
-            View Map
-          </button>
+        <button className="btn btnPrimary btnWide" type="button" onClick={goSignup} disabled={busy}>
+          Sign Up
+        </button>
 
           <div className="help">
-            {/* <span>Need access? Contact your administrator.</span> */}
+            <span>Need access? Contact your administrator.</span>
             <span>© DENR</span>
             <span className="devCredit">
               Developed by{" "}
