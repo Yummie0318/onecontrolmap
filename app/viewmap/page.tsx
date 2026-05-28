@@ -918,7 +918,14 @@ const groupedFiltered = useMemo(() => {
   }
 
   // output ordered groups (only those with items)
-  return GROUP_ORDER.map((k) => ({ key: k, items: map.get(k) ?? [] })).filter((g) => g.items.length > 0);
+  return GROUP_ORDER
+  .filter((k) => {
+    if (k === "A&D" && authUser?.usertype !== "admin") return false;
+    return true;
+  })
+  .map((k) => ({ key: k, items: map.get(k) ?? [] }))
+  .filter((g) => g.items.length > 0);
+  
 }, [filtered, authUser]);
 
   const measureTo = measureFixedTo ?? measureHover;
