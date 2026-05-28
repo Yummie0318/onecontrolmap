@@ -537,13 +537,19 @@ export default function ResultMap(props: Props) {
     return orderedLayers.some((l) => Array.isArray(l.geojson?.features) && l.geojson.features.length > 0);
   }, [orderedLayers]);
 
-  const mapKey = useMemo(() => {
+const mapKey = useMemo(() => {
     const ids = orderedLayers.map((l) => l.id).join("|");
     const counts = orderedLayers
       .map((l) => (Array.isArray(l.geojson?.features) ? l.geojson.features.length : 0))
       .join(",");
     const orders = orderedLayers.map((l) => `${l.id}:${l.orderNo ?? 0}`).join("|");
-    return `map-${ids}-${counts}-${orders}`;
+    // include per-feature __color so map re-renders when colors change
+    const colors = orderedLayers.map((l) => {
+      const feats = l.geojson?.features;
+      if (!Array.isArray(feats)) return "";
+      return feats.map((f: any) => f?.properties?.__color ?? "").join(",");
+    }).join("|");
+    return `map-${ids}-${counts}-${orders}-${colors}`;
   }, [orderedLayers]);
 
   const Z_BASE = 450;
@@ -621,7 +627,8 @@ export default function ResultMap(props: Props) {
 
           const isMyLocLayer = layer.id === MY_LOC_LAYER_ID;
           const baseColor = layer.color || DEFAULT_FALLBACK_COLOR;
-          const geoKey = `geo-${layer.id}-${feats.length}`;
+const colorSig = feats.map((f: any) => f?.properties?.__color ?? "").join(",");
+const geoKey = `geo-${layer.id}-${feats.length}-${colorSig}`;
 
           const paneName = isMyLocLayer ? MY_LOC_PANE : `pane-${layer.id}`;
           const z = isMyLocLayer ? 999999 : Z_BASE + (layer.orderNo ?? 0);
