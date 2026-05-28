@@ -726,10 +726,12 @@ const STYLES = `
   [data-theme="light"] .groupBadge{ background:rgba(15,122,58,.10); color:#0a5428; border-color:rgba(15,122,58,.20); }
   .groupToggle{ font-size:10px; color:var(--muted); }
 .groupItems{
-    overflow-x:hidden;
-    padding:10px 10px 10px 10px;
-    display:flex; flex-direction:column; gap:7px;
-  }
+  overflow-x:hidden;
+  overflow-y:auto;
+  max-height:55vh;
+  padding:10px 10px 10px 10px;
+  display:flex; flex-direction:column; gap:7px;
+}
 
   /* ── ERROR ── */
   .err{
@@ -1285,7 +1287,7 @@ export default function ViewMapPage() {
   const [selectedFeatureIdxByLayer, setSelectedFeatureIdxByLayer] = useState<Record<string, Set<number>>>({});
   const [featureColorByLayer, setFeatureColorByLayer] = useState<Record<string, Record<number, string>>>({});
   const [tableColor, setTableColor] = useState(DEFAULT_TABLE_COLOR);
-  const [colorVersion, setColorVersion] = useState(0);
+
   
 
   const refreshList = useCallback(async () => {
@@ -1641,14 +1643,23 @@ export default function ViewMapPage() {
   const someFilteredSelected = useMemo(() => { if (!tableLayerId || !tableFilteredIdxs.length) return false; const sel = tableSelectedSet; let any = false, anyNot = false; for (const idx of tableFilteredIdxs) { if (sel.has(idx)) any = true; else anyNot = true; if (any && anyNot) return true; } return false; }, [tableLayerId, tableFilteredIdxs, tableSelectedSet]);
   const idxsToColorNow = useMemo(() => { if (!tableLayerId) return [] as number[]; const q = tableSearch.trim(); if (!q) return Array.from(tableSelectedSet); return tableFilteredIdxs.filter((i) => tableSelectedSet.has(i)); }, [tableLayerId, tableSearch, tableFilteredIdxs, tableSelectedSet]);
 
+// ✅ Only remount the map when selection/color overrides change.
+// Layer visibility, geojson data, and local uploads flow through props — no remount needed.
 const mapKey = useMemo(() => {
   const selSig = Object.entries(selectedFeatureIdxByLayer)
     .map(([id, s]) => `${id}:${Array.from(s).sort((a, b) => a - b).join(",")}`)
     .join("|");
-  const locSig = userLoc ? `${userLoc.lat.toFixed(6)},${userLoc.lng.toFixed(6)}` : "none";
-  const measureSig = `${measureActive ? "1" : "0"}|${measureTo ? `${measureTo.lat.toFixed(6)},${measureTo.lng.toFixed(6)}` : "none"}`;
-  return `${mapLayersInput.length}-${hashString(selSig)}-${hashString(locSig)}-${hashString(measureSig)}-c${colorVersion}`;
-}, [mapLayersInput.length, selectedFeatureIdxByLayer, userLoc, measureActive, measureTo, colorVersion]);
+  const clrSig = Object.entries(featureColorByLayer)
+    .map(([id, m]) => {
+      const entries = Object.entries(m)
+        .map(([k, v]) => `${k}:${v}`)
+        .sort((a, b) => a.localeCompare(b))
+        .join(",");
+      return `${id}:${entries}`;
+    })
+    .join("|");
+  return `map-${hashString(selSig)}-${hashString(clrSig)}`;
+}, [selectedFeatureIdxByLayer, featureColorByLayer]);
 
   const showOverlay = booting || loadingList;
   const overlayTitle = booting ? "Loading layers…" : loadingList ? "Refreshing layers…" : "";
@@ -1697,29 +1708,70 @@ const mapKey = useMemo(() => {
 
   const clearMeasure = useCallback(() => { setMeasureActive(false); setMeasureHover(null); setMeasureFixedTo(null); }, []);
 
-  const uploadLocalGeojson = useCallback((file: File) => {
-    if (!file.name.toLowerCase().endsWith(".geojson") && !file.name.toLowerCase().endsWith(".json")) { showToast("error", "Only .geojson or .json files are supported."); return; }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const raw = e.target?.result as string;
-        const parsed = JSON.parse(raw);
-        const fc = coerceFeatureCollection(parsed);
-        if (!fc) throw new Error("Not a valid GeoJSON FeatureCollection.");
-        const firstGeom = fc.features?.[0]?.geometry?.type ?? "Unknown";
-        const geomType = firstGeom.includes("Point") ? "Point" : firstGeom.includes("Line") ? "LineString" : firstGeom.includes("Polygon") ? "Polygon" : firstGeom;
-        const id = nextLocalId();
-        const name = file.name.replace(/\.(geojson|json)$/i, "");
-        const newLayer: MapLayer = { id, name: `📁 ${name}`, geom_type: geomType, srid: 4326, visible: true, geojson: fc, loading: false, _geoMode: "full" };
-        setLocalLayers((prev) => [...prev, newLayer]);
-        setLayerDrawOrder((prev) => { const w = prev.filter((x) => x !== id); return [...w, id]; });
-        showToast("success", `Loaded "${name}" (${fc.features?.length ?? 0} features)`);
-        setDesktopTab("selected");
-      } catch (err: any) { showToast("error", err?.message ?? "Failed to parse GeoJSON."); }
-    };
-    reader.onerror = () => showToast("error", "Could not read file.");
-    reader.readAsText(file);
-  }, [showToast, setLayerDrawOrder]);
+// REPLACE your uploadLocalGeojson useCallback with this:
+const uploadLocalGeojson = useCallback((file: File) => {
+  if (!file.name.toLowerCase().endsWith(".geojson") && !file.name.toLowerCase().endsWith(".json")) {
+    showToast("error", "Only .geojson or .json files are supported.");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const raw = e.target?.result as string;
+      const parsed = JSON.parse(raw);
+      const fc = coerceFeatureCollection(parsed);
+      if (!fc) throw new Error("Not a valid GeoJSON FeatureCollection.");
+      const firstGeom = fc.features?.[0]?.geometry?.type ?? "Unknown";
+      const geomType = firstGeom.includes("Point") ? "Point"
+        : firstGeom.includes("Line") ? "LineString"
+        : firstGeom.includes("Polygon") ? "Polygon"
+        : firstGeom;
+      const id = nextLocalId();
+      const name = file.name.replace(/\.(geojson|json)$/i, "");
+      const newLayer: MapLayer = {
+        id,
+        name: `📁 ${name}`,
+        geom_type: geomType,
+        srid: 4326,
+        visible: true,
+        geojson: fc,
+        loading: false,
+        _geoMode: "full",
+      };
+      setLocalLayers((prev) => [...prev, newLayer]);
+      setLayerDrawOrder((prev) => {
+        const w = prev.filter((x) => x !== id);
+        return [...w, id];
+      });
+      showToast("success", `Loaded "${name}" (${fc.features?.length ?? 0} features)`);
+      setDesktopTab("selected");
+      // ✅ Auto-open attribute table and zoom to the uploaded layer
+      setTableLayerId(id);
+      setTableOpen(true);
+      setTableCollapsed(false);
+      setTableColor(DEFAULT_TABLE_COLOR);
+      setTableSearch("");
+      pendingZoomRef.current = { layerId: id, nonce: Date.now() };
+    } catch (err: any) {
+      showToast("error", err?.message ?? "Failed to parse GeoJSON.");
+    }
+  };
+  reader.onerror = () => showToast("error", "Could not read file.");
+  reader.readAsText(file);
+}, [showToast]); // ✅ no longer needs openAttributeTable dep — calls setters directly
+
+const pendingZoomRef = useRef<{ layerId: string; nonce: number } | null>(null);
+
+
+useEffect(() => {
+  const pending = pendingZoomRef.current;
+  if (!pending) return;
+  const found = mapLayersInput.find((l) => l.id === pending.layerId);
+  if (found) {
+    pendingZoomRef.current = null;
+    setZoomTo({ type: "layer", layerId: pending.layerId, nonce: pending.nonce });
+  }
+}, [mapLayersInput]);
 
   const removeLocalLayer = useCallback((id: string) => {
     setLocalLayers((prev) => prev.filter((l) => l.id !== id));
